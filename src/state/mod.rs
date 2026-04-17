@@ -184,9 +184,10 @@ pub struct AppState {
     pub messages_render_info: Option<MessagesRenderInfo>,
 
     // Custom emoji
-    pub custom_emoji: HashMap<String, String>, // name -> resolved URL
+    pub custom_emoji: HashMap<String, String>, // name -> resolved URL or "alias:other"
     pub custom_emoji_images: HashMap<String, CachedImage>,
     pub pending_emoji_images: HashSet<String>,
+    pub emoji_load_queue: Vec<String>,
 
     // Channel sections
     pub channel_sections: Vec<crate::slack::types::ChannelSection>,
@@ -320,6 +321,7 @@ impl AppState {
             custom_emoji: HashMap::new(),
             custom_emoji_images: HashMap::new(),
             pending_emoji_images: HashSet::new(),
+            emoji_load_queue: Vec::new(),
             channel_sections: Vec::new(),
             collapsed_sections: HashSet::new(),
             dm_list_expanded: false,
@@ -975,6 +977,45 @@ impl AppState {
             }
         }
         None
+    }
+
+    /// Resolve a custom emoji name to the canonical key used for caching.
+    /// Follows alias chains to find the base name that has a direct URL.
+    pub fn resolve_emoji_key(&self, name: &str) -> Option<String> {
+        let mut current = name;
+        for _ in 0..5 {
+            match self.custom_emoji.get(current) {
+                Some(val) if val.starts_with("alias:") => {
+                    current = &val["alias:".len()..];
+                }
+                Some(_) => return Some(current.to_string()),
+                None => return None,
+            }
+        }
+        None
+    }
+
+    pub fn has_emoji_image(&self, name: &str) -> bool {
+        if let Some(key) = self.resolve_emoji_key(name) {
+            self.custom_emoji_images.contains_key(&key)
+        } else {
+            false
+        }
+    }
+
+    pub fn emoji_image(&self, name: &str) -> Option<&CachedImage> {
+        let key = self.resolve_emoji_key(name)?;
+        self.custom_emoji_images.get(&key)
+    }
+
+    pub fn request_emoji_load(&mut self, name: &str) {
+        if let Some(key) = self.resolve_emoji_key(name) {
+            if !self.custom_emoji_images.contains_key(&key)
+                && !self.pending_emoji_images.contains(&key)
+            {
+                self.emoji_load_queue.push(key);
+            }
+        }
     }
 
     /// Group channels into sections. Returns (section_name, section_id, channel_indices).

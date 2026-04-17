@@ -121,11 +121,13 @@ impl App {
 
                     // Render immediately — don't wait for tick
                     Self::render_frame(&mut self.state, &mut terminal)?;
+                    crate::event::handler::process_emoji_load_queue(&mut self.state, &self.client, &self.event_tx);
                 }
                 _ = tick.tick() => {
                     // Periodic maintenance
                     self.state.expire_typing();
                     Self::render_frame(&mut self.state, &mut terminal)?;
+                    crate::event::handler::process_emoji_load_queue(&mut self.state, &self.client, &self.event_tx);
                 }
             }
         }

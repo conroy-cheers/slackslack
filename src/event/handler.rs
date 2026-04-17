@@ -96,7 +96,6 @@ pub fn handle_event<C: SlackApi>(
         }
         Event::CustomEmojiLoaded(emoji_map) => {
             state.custom_emoji = emoji_map;
-            trigger_emoji_image_downloads(state, client, event_tx);
             state.dirty = true;
             HandleResult::Continue
         }
@@ -112,6 +111,7 @@ pub fn handle_event<C: SlackApi>(
             height,
         } => {
             state.pending_emoji_images.remove(&name);
+            save_emoji_to_disk(&state.team_id, &name, &png_data);
             state.custom_emoji_images.insert(
                 name,
                 crate::state::CachedImage {
@@ -121,6 +121,10 @@ pub fn handle_event<C: SlackApi>(
                 },
             );
             state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::CustomEmojiImageFailed { name } => {
+            state.pending_emoji_images.remove(&name);
             HandleResult::Continue
         }
         Event::ApiError(err) => {
@@ -1288,28 +1292,74 @@ fn trigger_image_downloads<C: SlackApi>(
     }
 }
 
-fn trigger_emoji_image_downloads<C: SlackApi>(
+pub fn process_emoji_load_queue<C: SlackApi>(
     state: &mut AppState,
     client: &C,
     event_tx: &mpsc::UnboundedSender<Event>,
 ) {
-    // Download direct URLs (not aliases), limited to first 200
-    let to_download: Vec<(String, String)> = state
-        .custom_emoji
-        .iter()
-        .filter(|(_, val)| !val.starts_with("alias:"))
-        .filter(|(name, _)| {
-            !state.custom_emoji_images.contains_key(*name)
-                && !state.pending_emoji_images.contains(*name)
-        })
-        .take(200)
-        .map(|(name, url)| (name.clone(), url.clone()))
-        .collect();
-
-    for (name, url) in to_download {
-        state.pending_emoji_images.insert(name.clone());
-        spawn_download_emoji_image(client, &name, &url, event_tx);
+    let queue: Vec<String> = state.emoji_load_queue.drain(..).collect();
+    for key in queue {
+        if state.custom_emoji_images.contains_key(&key) || state.pending_emoji_images.contains(&key) {
+            continue;
+        }
+        if let Some(img) = load_emoji_from_disk(&state.team_id, &key) {
+            state.custom_emoji_images.insert(key, img);
+            state.dirty = true;
+            continue;
+        }
+        let url = match state.custom_emoji.get(&key) {
+            Some(url) if !url.starts_with("alias:") => url.clone(),
+            _ => continue,
+        };
+        state.pending_emoji_images.insert(key.clone());
+        spawn_download_emoji_image(client, &key, &url, event_tx);
     }
+}
+
+fn emoji_cache_dir(team_id: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!(
+        "{}/.cache/slackslack/{}/emoji",
+        home, team_id
+    ))
+}
+
+fn save_emoji_to_disk(team_id: &str, name: &str, png_data: &[u8]) {
+    if team_id.is_empty() {
+        return;
+    }
+    let dir = emoji_cache_dir(team_id);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        error!("Failed to create emoji cache dir: {}", e);
+        return;
+    }
+    let path = dir.join(format!("{}.png", name));
+    if let Err(e) = std::fs::write(&path, png_data) {
+        error!("Failed to write emoji cache {}: {}", path.display(), e);
+    }
+}
+
+fn load_emoji_from_disk(team_id: &str, name: &str) -> Option<crate::state::CachedImage> {
+    if team_id.is_empty() {
+        return None;
+    }
+    let path = emoji_cache_dir(team_id).join(format!("{}.png", name));
+    let data = std::fs::read(&path).ok()?;
+    let (width, height) = read_png_dimensions(&data)?;
+    Some(crate::state::CachedImage {
+        png_data: data,
+        width,
+        height,
+    })
+}
+
+fn read_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 24 || &data[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+    let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+    Some((width, height))
 }
 
 fn spawn_download_emoji_image<C: SlackApi>(
@@ -1332,10 +1382,13 @@ fn spawn_download_emoji_image<C: SlackApi>(
                         width,
                         height,
                     });
+                } else {
+                    let _ = tx.send(Event::CustomEmojiImageFailed { name });
                 }
             }
             Err(e) => {
                 error!("Failed to download emoji {}: {}", name, e);
+                let _ = tx.send(Event::CustomEmojiImageFailed { name });
             }
         }
     });

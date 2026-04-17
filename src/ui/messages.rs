@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     // Build all lines as owned data (Line<'static>) so we don't borrow state
     let msg_count = state.message_count();
     let selected_idx = msg_count.saturating_sub(1).saturating_sub(state.selected_message_idx);
-    let (lines, placements, msg_line_starts) = build_lines(state, width, selected_idx);
+    let (lines, placements, msg_line_starts, emoji_needed) = build_lines(state, width, selected_idx);
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(height);
 
@@ -78,6 +78,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     // Store render info for kitty image positioning
     state.image_placements = placements;
+    state.emoji_load_queue.extend(emoji_needed);
     state.messages_render_info = Some(MessagesRenderInfo {
         inner_x: inner.x,
         inner_y: inner.y,
@@ -108,16 +109,17 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     }
 }
 
-/// Returns (lines, image_placements, msg_line_starts).
+/// Returns (lines, image_placements, msg_line_starts, emoji_needed).
 fn build_lines(
     state: &AppState,
     width: usize,
     selected_idx: usize,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>) {
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>, Vec<String>) {
     let messages = state.channel_messages();
 
     let mut placements = Vec::new();
     let mut msg_line_starts = Vec::new();
+    let mut emoji_needed = Vec::new();
 
     let mut result = match messages {
         Some(msgs) if !msgs.is_empty() => {
@@ -136,6 +138,7 @@ fn build_lines(
                     is_search_match,
                     &mut lines,
                     &mut placements,
+                    &mut emoji_needed,
                 );
                 if i + 1 < msg_count {
                     lines.push(Line::from(""));
@@ -167,7 +170,7 @@ fn build_lines(
         )));
     }
 
-    (result, placements, msg_line_starts)
+    (result, placements, msg_line_starts, emoji_needed)
 }
 
 fn render_message(
@@ -178,6 +181,7 @@ fn render_message(
     is_search_match: bool,
     out: &mut Vec<Line<'static>>,
     placements: &mut Vec<ImagePlacement>,
+    emoji_needed: &mut Vec<String>,
 ) {
     let username = msg
         .user
@@ -261,6 +265,7 @@ fn render_message(
                 &mut col,
                 state,
                 placements,
+                emoji_needed,
             );
             final_spans.extend(processed);
         }
@@ -285,10 +290,10 @@ fn render_message(
                 let display = e.to_string();
                 col += UnicodeWidthStr::width(display.as_str()) as u16;
                 spans.push(Span::styled(display, Style::default().fg(Color::Yellow)));
-            } else if state.custom_emoji_images.contains_key(&r.name) {
-                // Custom emoji with cached image — placeholder + placement
+            } else if state.has_emoji_image(&r.name) {
+                let key = state.resolve_emoji_key(&r.name).unwrap();
                 placements.push(ImagePlacement {
-                    url: r.name.clone(),
+                    url: key,
                     line: reaction_line,
                     col,
                     display_cols: 2,
@@ -297,6 +302,9 @@ fn render_message(
                 spans.push(Span::styled("  ".to_string(), Style::default()));
                 col += 2;
             } else {
+                if state.custom_emoji.contains_key(&r.name) || state.resolve_emoji_key(&r.name).is_some() {
+                    emoji_needed.push(r.name.clone());
+                }
                 let display = format!(":{}:", r.name);
                 col += display.len() as u16;
                 spans.push(Span::styled(display, Style::default().fg(Color::Yellow)));
@@ -358,9 +366,9 @@ fn replace_custom_emoji_in_span(
     col: &mut u16,
     state: &AppState,
     placements: &mut Vec<ImagePlacement>,
+    emoji_needed: &mut Vec<String>,
 ) -> Vec<Span<'static>> {
-    // Fast path: no colons means no emoji to replace
-    if !text.contains(':') || state.custom_emoji_images.is_empty() {
+    if !text.contains(':') || state.custom_emoji.is_empty() {
         *col += UnicodeWidthStr::width(text) as u16;
         return vec![Span::styled(text.to_string(), style)];
     }
@@ -372,21 +380,26 @@ fn replace_custom_emoji_in_span(
 
     while i < len {
         if bytes[i] == b':' {
-            // Try to find a closing colon for a valid shortcode
             let start = i;
             let mut j = i + 1;
             let limit = len.min(j + 64);
-            let mut found = false;
+            let mut found_key = None;
+            let mut is_known = false;
 
             while j < limit {
                 let b = bytes[j];
                 if b == b':' {
                     let name = &text[start + 1..j];
-                    if !name.is_empty() && state.custom_emoji_images.contains_key(name) {
-                        found = true;
-                        break;
+                    if !name.is_empty() {
+                        if let Some(key) = state.resolve_emoji_key(name) {
+                            if state.custom_emoji_images.contains_key(&key) {
+                                found_key = Some(key);
+                            } else {
+                                is_known = true;
+                            }
+                        }
                     }
-                    break; // Not a custom emoji, treat opening colon as literal
+                    break;
                 } else if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+' {
                     j += 1;
                 } else {
@@ -394,16 +407,9 @@ fn replace_custom_emoji_in_span(
                 }
             }
 
-            if !found {
-                // Not a custom emoji — advance past the colon
-                *col += 1;
-                result.push(Span::styled(":".to_string(), style));
-                i = start + 1;
-            } else {
-                let name = &text[start + 1..j];
-                // Emit placeholder and record placement
+            if let Some(key) = found_key {
                 placements.push(ImagePlacement {
-                    url: name.to_string(),
+                    url: key,
                     line: line_idx,
                     col: *col,
                     display_cols: 2,
@@ -411,10 +417,20 @@ fn replace_custom_emoji_in_span(
                 });
                 result.push(Span::styled("  ".to_string(), Style::default()));
                 *col += 2;
-                i = j + 1; // skip past closing colon
+                i = j + 1;
+            } else if is_known {
+                let name = &text[start + 1..j];
+                emoji_needed.push(name.to_string());
+                let display = format!(":{}:", name);
+                *col += UnicodeWidthStr::width(display.as_str()) as u16;
+                result.push(Span::styled(display, Style::default().fg(Color::Yellow)));
+                i = j + 1;
+            } else {
+                *col += 1;
+                result.push(Span::styled(":".to_string(), style));
+                i = start + 1;
             }
         } else {
-            // Regular character — find the next colon or end
             let start = i;
             i += 1;
             while i < len && bytes[i] != b':' {
@@ -850,7 +866,7 @@ mod tests {
         ];
         let state = state_with(messages, &["http://img1", "http://img2"]);
 
-        let (lines, placements, starts) = build_lines(&state, 80, 3);
+        let (lines, placements, starts, _) = build_lines(&state, 80, 3);
 
         for p in &placements {
             assert!(
@@ -901,7 +917,7 @@ mod tests {
         let state = state_with(messages, &refs);
 
         for sel_idx in 0..20 {
-            let (lines, placements, starts) = build_lines(&state, 80, sel_idx);
+            let (lines, placements, starts, _) = build_lines(&state, 80, sel_idx);
 
             for p in &placements {
                 assert!(
@@ -922,7 +938,7 @@ mod tests {
     #[test]
     fn empty_channel_no_placements() {
         let state = state_with(vec![], &[]);
-        let (lines, placements, starts) = build_lines(&state, 80, 0);
+        let (lines, placements, starts, _) = build_lines(&state, 80, 0);
 
         assert!(placements.is_empty());
         assert!(starts.is_empty());
@@ -935,7 +951,7 @@ mod tests {
         let messages = vec![msg_with_image("hi", "1000.0", "http://not_cached")];
         let state = state_with(messages, &[]); // no cached URLs
 
-        let (_, placements, _) = build_lines(&state, 80, 0);
+        let (_, placements, _, _) = build_lines(&state, 80, 0);
         assert!(placements.is_empty());
     }
 
@@ -949,7 +965,7 @@ mod tests {
         let state = state_with(messages, &["http://img"]);
 
         for width in [1, 5, 20, 80, 200, 400] {
-            let (lines, placements, starts) = build_lines(&state, width, 1);
+            let (lines, placements, starts, _) = build_lines(&state, width, 1);
 
             for p in &placements {
                 assert!(
