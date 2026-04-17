@@ -20,24 +20,41 @@ pub fn render_visible_images(
     writer: &mut impl Write,
     state: &AppState,
 ) -> std::io::Result<()> {
-    let info = match &state.messages_render_info {
-        Some(info) => info,
-        None => return Ok(()),
-    };
+    let has_messages = state.messages_render_info.is_some() && !state.image_placements.is_empty();
+    let has_thread = state.thread_render_info.is_some() && !state.thread_placements.is_empty();
 
-    if state.image_placements.is_empty() {
+    if !has_messages && !has_thread {
         return Ok(());
     }
 
-    // Save cursor position
     write!(writer, "\x1b[s")?;
 
-    for placement in &state.image_placements {
-        // Check if the image is within the visible area
-        let line = placement.line;
-        let scroll_y = info.scroll_y;
-        let visible_end = scroll_y + info.inner_height as usize;
+    if let Some(info) = &state.messages_render_info {
+        render_placements(writer, &state.image_placements, info.inner_x, info.inner_y, info.inner_height, info.scroll_y, state)?;
+    }
 
+    if let Some(info) = &state.thread_render_info {
+        render_placements(writer, &state.thread_placements, info.inner_x, info.inner_y, info.inner_height, info.scroll_y, state)?;
+    }
+
+    write!(writer, "\x1b[u")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn render_placements(
+    writer: &mut impl Write,
+    placements: &[crate::state::ImagePlacement],
+    inner_x: u16,
+    inner_y: u16,
+    inner_height: u16,
+    scroll_y: usize,
+    state: &AppState,
+) -> std::io::Result<()> {
+    let visible_end = scroll_y + inner_height as usize;
+
+    for placement in placements {
+        let line = placement.line;
         if line < scroll_y || line >= visible_end {
             continue;
         }
@@ -50,11 +67,10 @@ pub fn render_visible_images(
         };
 
         let offset_in_view = (line - scroll_y) as u16;
-        let screen_row = info.inner_y + offset_in_view;
-        let screen_col = info.inner_x + placement.col;
+        let screen_row = inner_y + offset_in_view;
+        let screen_col = inner_x + placement.col;
 
-        // Clip image to remaining rows in viewport
-        let rows_remaining = info.inner_height.saturating_sub(offset_in_view);
+        let rows_remaining = inner_height.saturating_sub(offset_in_view);
         let display_rows = placement.display_rows.min(rows_remaining);
 
         if display_rows == 0 {
@@ -70,10 +86,6 @@ pub fn render_visible_images(
             &cached.png_data,
         )?;
     }
-
-    // Restore cursor position
-    write!(writer, "\x1b[u")?;
-    writer.flush()?;
     Ok(())
 }
 

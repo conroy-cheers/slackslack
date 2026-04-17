@@ -182,6 +182,8 @@ pub struct AppState {
     pub pending_images: HashSet<String>,
     pub image_placements: Vec<ImagePlacement>,
     pub messages_render_info: Option<MessagesRenderInfo>,
+    pub thread_placements: Vec<ImagePlacement>,
+    pub thread_render_info: Option<ThreadRenderInfo>,
 
     // Custom emoji
     pub custom_emoji: HashMap<String, String>, // name -> resolved URL or "alias:other"
@@ -236,8 +238,15 @@ pub struct ImagePlacement {
     pub display_rows: u16,
 }
 
-/// Rendering metadata from the messages panel, used for image positioning.
+/// Rendering metadata for a panel, used for image positioning.
 pub struct MessagesRenderInfo {
+    pub inner_x: u16,
+    pub inner_y: u16,
+    pub inner_height: u16,
+    pub scroll_y: usize,
+}
+
+pub struct ThreadRenderInfo {
     pub inner_x: u16,
     pub inner_y: u16,
     pub inner_height: u16,
@@ -318,6 +327,8 @@ impl AppState {
             pending_images: HashSet::new(),
             image_placements: Vec::new(),
             messages_render_info: None,
+            thread_placements: Vec::new(),
+            thread_render_info: None,
             custom_emoji: HashMap::new(),
             custom_emoji_images: HashMap::new(),
             pending_emoji_images: HashSet::new(),

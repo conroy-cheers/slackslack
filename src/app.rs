@@ -165,7 +165,8 @@ impl App {
             use std::io::Write;
             let mut buf: Vec<u8> = Vec::new();
 
-            if has_modal || state.image_placements.is_empty() {
+            let has_images = !state.image_placements.is_empty() || !state.thread_placements.is_empty();
+            if has_modal || !has_images {
                 ui::images::clear_images(&mut buf)?;
             } else {
                 ui::images::clear_images(&mut buf)?;

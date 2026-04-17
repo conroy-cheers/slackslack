@@ -530,6 +530,22 @@ pub fn resolve_slack_markup_pub(text: &str, state: &AppState) -> String {
     resolve_slack_markup(text, state)
 }
 
+pub fn render_rich_text_pub(text: &str, state: &AppState, usable_width: usize) -> Vec<Vec<Span<'static>>> {
+    render_rich_text(text, state, usable_width)
+}
+
+pub fn replace_custom_emoji_in_span_pub(
+    text: &str,
+    style: Style,
+    line_idx: usize,
+    col: &mut u16,
+    state: &AppState,
+    placements: &mut Vec<ImagePlacement>,
+    emoji_needed: &mut Vec<String>,
+) -> Vec<Span<'static>> {
+    replace_custom_emoji_in_span(text, style, line_idx, col, state, placements, emoji_needed)
+}
+
 /// Resolve Slack special markup: <@U>, <#C>, <!cmd>, <url|label>, &entities;, :emoji:
 fn resolve_slack_markup(text: &str, state: &AppState) -> String {
     let mut result = String::with_capacity(text.len());

@@ -1,4 +1,4 @@
-use crate::state::{AppState, Focus};
+use crate::state::{AppState, Focus, ImagePlacement, ThreadRenderInfo};
 use crate::ui::emoji;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -8,6 +8,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientatio
 use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
+    state.thread_placements.clear();
+    state.thread_render_info = None;
+
     let is_focused = state.focus == Focus::Thread;
 
     let border_style = if is_focused {
@@ -31,7 +34,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         return;
     }
 
-    let lines = build_thread_lines(state, width);
+    let (lines, placements, emoji_needed) = build_thread_lines(state, width);
     let total_lines = lines.len();
 
     state.thread_max_scroll_offset = total_lines.saturating_sub(height);
@@ -42,6 +45,15 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let scroll_y = state
         .thread_max_scroll_offset
         .saturating_sub(state.thread_scroll_offset);
+
+    state.thread_placements = placements;
+    state.thread_render_info = Some(ThreadRenderInfo {
+        inner_x: inner.x,
+        inner_y: inner.y,
+        inner_height: inner.height,
+        scroll_y,
+    });
+    state.emoji_load_queue.extend(emoji_needed);
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -66,28 +78,37 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     }
 }
 
-fn build_thread_lines(state: &AppState, width: usize) -> Vec<Line<'static>> {
+fn build_thread_lines(
+    state: &AppState,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<String>) {
     let msgs = match state.thread_messages() {
         Some(msgs) if !msgs.is_empty() => msgs,
         _ => {
-            return vec![Line::from(Span::styled(
-                "  Loading thread...".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ))];
+            return (
+                vec![Line::from(Span::styled(
+                    "  Loading thread...".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ))],
+                Vec::new(),
+                Vec::new(),
+            );
         }
     };
 
     let mut result = Vec::new();
+    let mut placements = Vec::new();
+    let mut emoji_needed = Vec::new();
     let msg_count = msgs.len();
 
     for (i, msg) in msgs.iter().enumerate() {
-        render_thread_message(msg, state, width, i == 0, &mut result);
+        render_thread_message(msg, state, width, i == 0, &mut result, &mut placements, &mut emoji_needed);
         if i + 1 < msg_count {
             result.push(Line::from(""));
         }
     }
 
-    result
+    (result, placements, emoji_needed)
 }
 
 fn render_thread_message(
@@ -96,6 +117,8 @@ fn render_thread_message(
     width: usize,
     is_parent: bool,
     out: &mut Vec<Line<'static>>,
+    placements: &mut Vec<ImagePlacement>,
+    emoji_needed: &mut Vec<String>,
 ) {
     let username = msg
         .user
@@ -123,66 +146,66 @@ fn render_thread_message(
     ];
     out.push(Line::from(header_spans));
 
-    // Body text
-    let text = emoji::replace_emoji_shortcodes(
-        &super::messages::resolve_slack_markup_pub(&msg.text, state),
-    );
-    let usable = width.saturating_sub(2);
-    for text_line in text.lines() {
-        if usable == 0 {
-            out.push(Line::from(format!("  {}", text_line)));
-            continue;
+    // Body text with rich formatting and custom emoji
+    let body_lines = super::messages::render_rich_text_pub(&msg.text, state, width.saturating_sub(2));
+    for line_spans in body_lines {
+        let line_idx = out.len();
+        let mut final_spans = vec![Span::styled("  ".to_string(), Style::default())];
+        let mut col: u16 = 2;
+        for span in line_spans {
+            let processed = super::messages::replace_custom_emoji_in_span_pub(
+                &span.content,
+                span.style,
+                line_idx,
+                &mut col,
+                state,
+                placements,
+                emoji_needed,
+            );
+            final_spans.extend(processed);
         }
-        for wrapped in wrap_line(text_line, usable) {
-            out.push(Line::from(format!("  {}", wrapped)));
-        }
+        out.push(Line::from(final_spans));
     }
 
     // Reactions
     if !msg.reactions.is_empty() {
         let mut spans: Vec<Span<'static>> = vec![Span::from(String::from("  "))];
+        let mut col: u16 = 2;
+        let reaction_line = out.len();
         for (i, r) in msg.reactions.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::from(String::from(" ")));
+                col += 1;
             }
-            let emoji_display = emoji::emoji_for(&r.name)
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| format!(":{}:", r.name));
-            spans.push(Span::styled(emoji_display, Style::default().fg(Color::Yellow)));
-            spans.push(Span::styled(
-                format!(" {}", r.count),
-                Style::default().fg(Color::DarkGray),
-            ));
+            if let Some(e) = emoji::emoji_for(&r.name) {
+                let display = e.to_string();
+                col += UnicodeWidthStr::width(display.as_str()) as u16;
+                spans.push(Span::styled(display, Style::default().fg(Color::Yellow)));
+            } else if state.has_emoji_image(&r.name) {
+                let key = state.resolve_emoji_key(&r.name).unwrap();
+                placements.push(ImagePlacement {
+                    url: key,
+                    line: reaction_line,
+                    col,
+                    display_cols: 2,
+                    display_rows: 1,
+                });
+                spans.push(Span::styled("  ".to_string(), Style::default()));
+                col += 2;
+            } else {
+                if state.custom_emoji.contains_key(&r.name) || state.resolve_emoji_key(&r.name).is_some() {
+                    emoji_needed.push(r.name.clone());
+                }
+                let display = format!(":{}:", r.name);
+                col += UnicodeWidthStr::width(display.as_str()) as u16;
+                spans.push(Span::styled(display, Style::default().fg(Color::Yellow)));
+            }
+            let count_str = format!(" {}", r.count);
+            col += count_str.len() as u16;
+            spans.push(Span::styled(count_str, Style::default().fg(Color::DarkGray)));
         }
         out.push(Line::from(spans));
     }
-}
-
-fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![line.to_string()];
-    }
-    let line_width = UnicodeWidthStr::width(line);
-    if line_width <= max_width {
-        return vec![line.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    for word in line.split_inclusive(|c: char| c.is_whitespace()) {
-        let word_width = UnicodeWidthStr::width(word);
-        if current_width + word_width > max_width && current_width > 0 {
-            lines.push(current.clone());
-            current.clear();
-            current_width = 0;
-        }
-        current.push_str(word);
-        current_width += word_width;
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
 }
 
 fn format_timestamp(ts: &str) -> String {
