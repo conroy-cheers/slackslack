@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
-pub fn render(frame: &mut Frame, state: &AppState) {
+pub fn render(frame: &mut Frame, state: &mut AppState) {
     let area = centered_rect(50, 60, frame.area());
     frame.render_widget(Clear, area);
 
@@ -72,8 +72,18 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 Style::default().fg(Color::White)
             };
 
+            let emoji_display = if *is_custom {
+                if state.has_emoji_image(name) {
+                    "  ".to_string()
+                } else {
+                    display.clone()
+                }
+            } else {
+                display.clone()
+            };
+
             let mut spans = vec![
-                Span::styled(format!(" {} ", display), style),
+                Span::styled(format!(" {} ", emoji_display), style),
                 Span::styled(format!(":{}: ", name), if selected { style } else { Style::default().fg(Color::DarkGray) }),
             ];
 
@@ -91,6 +101,25 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     let list = List::new(items);
     frame.render_stateful_widget(list, results_area, &mut list_state);
+
+    // Use ratatui's actual scroll offset for correct image placement
+    let scroll_offset = list_state.offset();
+
+    // Place inline emoji images for visible custom emoji
+    let visible_names: Vec<(usize, String)> = state
+        .emoji_picker_results
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, _, is_custom))| {
+            *is_custom && *i >= scroll_offset && *i < scroll_offset + max_visible
+        })
+        .map(|(i, (name, _, _))| (i, name.clone()))
+        .collect();
+
+    for (i, name) in visible_names {
+        let row_in_list = (i - scroll_offset) as u16;
+        state.place_inline_emoji(&name, results_area.y + row_in_list, results_area.x + 1);
+    }
 
     // Scrollbar for results
     if item_count > max_visible {

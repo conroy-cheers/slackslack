@@ -22,8 +22,9 @@ pub fn render_visible_images(
 ) -> std::io::Result<()> {
     let has_messages = state.messages_render_info.is_some() && !state.image_placements.is_empty();
     let has_thread = state.thread_render_info.is_some() && !state.thread_placements.is_empty();
+    let has_inline = !state.inline_emoji_placements.is_empty();
 
-    if !has_messages && !has_thread {
+    if !has_messages && !has_thread && !has_inline {
         return Ok(());
     }
 
@@ -37,8 +38,31 @@ pub fn render_visible_images(
         render_placements(writer, &state.thread_placements, info.inner_x, info.inner_y, info.inner_height, info.scroll_y, state)?;
     }
 
+    render_inline_emoji(writer, state)?;
+
     write!(writer, "\x1b[u")?;
     writer.flush()?;
+    Ok(())
+}
+
+fn render_inline_emoji(
+    writer: &mut impl Write,
+    state: &AppState,
+) -> std::io::Result<()> {
+    for p in &state.inline_emoji_placements {
+        let cached = match state.custom_emoji_images.get(&p.emoji_key) {
+            Some(c) => c,
+            None => continue,
+        };
+        display_image(
+            writer,
+            p.screen_row,
+            p.screen_col,
+            p.display_cols,
+            p.display_rows,
+            &cached.png_data,
+        )?;
+    }
     Ok(())
 }
 

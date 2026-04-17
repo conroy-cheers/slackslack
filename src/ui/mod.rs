@@ -16,6 +16,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
+    state.inline_emoji_placements.clear();
     let size = frame.area();
 
     // Outer layout: main area + status bar (full width at very bottom)
@@ -132,6 +133,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     if state.input_mode == InputMode::EmojiPicker {
         emoji_picker::render(frame, state);
     }
+
 }
 
 #[cfg(test)]

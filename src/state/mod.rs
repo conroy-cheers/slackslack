@@ -184,6 +184,7 @@ pub struct AppState {
     pub messages_render_info: Option<MessagesRenderInfo>,
     pub thread_placements: Vec<ImagePlacement>,
     pub thread_render_info: Option<ThreadRenderInfo>,
+    pub inline_emoji_placements: Vec<InlineEmojiPlacement>,
 
     // Custom emoji
     pub custom_emoji: HashMap<String, String>, // name -> resolved URL or "alias:other"
@@ -234,6 +235,17 @@ pub struct ImagePlacement {
     pub url: String,
     pub line: usize,       // virtual line number within the message list
     pub col: u16,          // column offset from inner_x (0-indexed)
+    pub display_cols: u16,
+    pub display_rows: u16,
+}
+
+/// An emoji image placed at absolute screen coordinates.
+/// Unlike ImagePlacement (which uses virtual line numbers within a scrollable
+/// panel), this uses final screen row/col — usable by any widget.
+pub struct InlineEmojiPlacement {
+    pub emoji_key: String,
+    pub screen_row: u16,
+    pub screen_col: u16,
     pub display_cols: u16,
     pub display_rows: u16,
 }
@@ -329,6 +341,7 @@ impl AppState {
             messages_render_info: None,
             thread_placements: Vec::new(),
             thread_render_info: None,
+            inline_emoji_placements: Vec::new(),
             custom_emoji: HashMap::new(),
             custom_emoji_images: HashMap::new(),
             pending_emoji_images: HashSet::new(),
@@ -1027,6 +1040,34 @@ impl AppState {
                 self.emoji_load_queue.push(key);
             }
         }
+    }
+
+    /// Place a custom emoji image at an absolute screen position.
+    /// Returns true if the image was placed (cached and ready), false if
+    /// it was enqueued for loading. Callers should render a 2-cell-wide
+    /// placeholder in either case.
+    pub fn place_inline_emoji(
+        &mut self,
+        name: &str,
+        screen_row: u16,
+        screen_col: u16,
+    ) -> bool {
+        if let Some(key) = self.resolve_emoji_key(name) {
+            if self.custom_emoji_images.contains_key(&key) {
+                self.inline_emoji_placements.push(InlineEmojiPlacement {
+                    emoji_key: key,
+                    screen_row,
+                    screen_col,
+                    display_cols: 2,
+                    display_rows: 1,
+                });
+                return true;
+            }
+            if !self.pending_emoji_images.contains(&key) {
+                self.emoji_load_queue.push(key);
+            }
+        }
+        false
     }
 
     /// Group channels into sections. Returns (section_name, section_id, channel_indices).

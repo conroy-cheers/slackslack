@@ -160,16 +160,12 @@ impl App {
         state.frame_count += 1;
 
         // Post-frame writes (images, clipboard)
-        let has_modal = state.show_help || state.input_mode == crate::state::InputMode::EmojiPicker;
         {
             use std::io::Write;
             let mut buf: Vec<u8> = Vec::new();
 
-            let has_images = !state.image_placements.is_empty() || !state.thread_placements.is_empty();
-            if has_modal || !has_images {
-                ui::images::clear_images(&mut buf)?;
-            } else {
-                ui::images::clear_images(&mut buf)?;
+            ui::images::clear_images(&mut buf)?;
+            if !state.show_help {
                 ui::images::render_visible_images(&mut buf, state)?;
             }
 
