@@ -482,19 +482,42 @@ impl AppState {
     }
 
     pub fn channel_next(&mut self) {
-        if !self.channels.is_empty() {
-            self.selected_channel_idx = (self.selected_channel_idx + 1) % self.channels.len();
+        let visible = self.visible_channel_indices();
+        if visible.is_empty() {
+            return;
+        }
+        if let Some(pos) = visible.iter().position(|&i| i == self.selected_channel_idx) {
+            let next = (pos + 1) % visible.len();
+            self.selected_channel_idx = visible[next];
+        } else {
+            self.selected_channel_idx = visible[0];
         }
     }
 
     pub fn channel_prev(&mut self) {
-        if !self.channels.is_empty() {
-            if self.selected_channel_idx == 0 {
-                self.selected_channel_idx = self.channels.len() - 1;
-            } else {
-                self.selected_channel_idx -= 1;
-            }
+        let visible = self.visible_channel_indices();
+        if visible.is_empty() {
+            return;
         }
+        if let Some(pos) = visible.iter().position(|&i| i == self.selected_channel_idx) {
+            let prev = if pos == 0 { visible.len() - 1 } else { pos - 1 };
+            self.selected_channel_idx = visible[prev];
+        } else {
+            self.selected_channel_idx = *visible.last().unwrap();
+        }
+    }
+
+    pub fn visible_channel_indices(&self) -> Vec<usize> {
+        if self.channel_list_items.is_empty() {
+            return (0..self.channels.len()).collect();
+        }
+        self.channel_list_items
+            .iter()
+            .filter_map(|entry| match entry {
+                ChannelListEntry::Channel(idx) => Some(*idx),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Navigate to next channel in filtered list.

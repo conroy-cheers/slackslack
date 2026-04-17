@@ -207,21 +207,30 @@ fn handle_normal_channels<C: SlackApi>(
         KeyCode::Char('j') | KeyCode::Down => state.channel_next(),
         KeyCode::Char('k') | KeyCode::Up => state.channel_prev(),
         KeyCode::Char('G') | KeyCode::End => {
-            if !state.channels.is_empty() {
-                state.selected_channel_idx = state.channels.len() - 1;
+            let visible = state.visible_channel_indices();
+            if let Some(&last) = visible.last() {
+                state.selected_channel_idx = last;
             }
         }
         KeyCode::Char('g') | KeyCode::Home => {
-            state.selected_channel_idx = 0;
+            let visible = state.visible_channel_indices();
+            if let Some(&first) = visible.first() {
+                state.selected_channel_idx = first;
+            }
         }
         KeyCode::PageDown => {
-            let page = 15;
-            let max = state.channels.len().saturating_sub(1);
-            state.selected_channel_idx = (state.selected_channel_idx + page).min(max);
+            let visible = state.visible_channel_indices();
+            if let Some(pos) = visible.iter().position(|&i| i == state.selected_channel_idx) {
+                let target = (pos + 15).min(visible.len().saturating_sub(1));
+                state.selected_channel_idx = visible[target];
+            }
         }
         KeyCode::PageUp => {
-            let page = 15;
-            state.selected_channel_idx = state.selected_channel_idx.saturating_sub(page);
+            let visible = state.visible_channel_indices();
+            if let Some(pos) = visible.iter().position(|&i| i == state.selected_channel_idx) {
+                let target = pos.saturating_sub(15);
+                state.selected_channel_idx = visible[target];
+            }
         }
         // Open channel / toggle section
         KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
