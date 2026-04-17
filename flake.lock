@@ -1,0 +1,25 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1775595990,
+        "narHash": "sha256-OEf7YqhF9IjJFYZJyuhAypgU+VsRB5lD4DuiMws5Ltc=",
+        "rev": "4e92bbcdb030f3b4782be4751dc08e6b6cb6ccf2",
+        "revCount": 910799,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/NixOS/nixpkgs/0.2511.910799%2Brev-4e92bbcdb030f3b4782be4751dc08e6b6cb6ccf2/019d70d9-32a8-77c3-8562-47e489748439/source.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://flakehub.com/f/NixOS/nixpkgs/0"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

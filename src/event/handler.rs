@@ -1,0 +1,1367 @@
+use crate::event::Event;
+use crate::slack::client::SlackApi;
+use crate::slack::types::{WsEvent, WsMessage};
+use crate::state::{AppState, Focus, InputMode};
+use crossterm::event::{KeyCode, KeyModifiers};
+use tokio::sync::mpsc;
+use tracing::error;
+
+pub fn handle_event<C: SlackApi>(
+    event: Event,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    match event {
+        Event::Key(key) => handle_key(key, state, client, event_tx),
+        Event::SlackConnected { self_id, team } => {
+            state.self_user_id = self_id;
+            state.team_name = team;
+            state.connected = true;
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::SlackDisconnected => {
+            state.connected = false;
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::SlackWsEvent(ws_event) => {
+            handle_ws_event(ws_event, state);
+            HandleResult::Continue
+        }
+        Event::WsPing(id) => {
+            if let Some(ref ws_tx) = state.ws_writer {
+                let msg = serde_json::json!({"id": id, "type": "ping"}).to_string();
+                let _ = ws_tx.send(msg);
+            }
+            HandleResult::Continue
+        }
+        Event::WsWriterReady(ws_tx) => {
+            state.ws_writer = Some(ws_tx);
+            HandleResult::Continue
+        }
+        Event::ChannelsLoaded(channels) => {
+            state.set_channels(channels);
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::HistoryLoaded {
+            channel_id,
+            messages,
+            has_more,
+        } => {
+            state.set_history(channel_id.clone(), messages, has_more);
+            trigger_image_downloads(state, &channel_id, client, event_tx);
+            mark_channel_read(state, client, event_tx, &channel_id);
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::OlderHistoryLoaded {
+            channel_id,
+            messages,
+            has_more,
+        } => {
+            state.prepend_history(channel_id, messages, has_more);
+            HandleResult::Continue
+        }
+        Event::ThreadLoaded {
+            channel_id,
+            thread_ts,
+            messages,
+        } => {
+            state.set_thread_messages(&channel_id, &thread_ts, messages);
+            HandleResult::Continue
+        }
+        Event::UsersLoaded(users) => {
+            for user in users {
+                state.user_cache.insert(user.id.clone(), user);
+            }
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::MessageSent { .. } => HandleResult::Continue,
+        Event::ChannelMarked { channel_id } => {
+            let _ = channel_id;
+            HandleResult::Continue
+        }
+        Event::ImageLoaded {
+            url,
+            png_data,
+            width,
+            height,
+        } => {
+            crate::ui::images::cache_image(state, url, png_data, width, height);
+            HandleResult::Continue
+        }
+        Event::CustomEmojiLoaded(emoji_map) => {
+            state.custom_emoji = emoji_map;
+            trigger_emoji_image_downloads(state, client, event_tx);
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::ChannelSectionsLoaded(sections) => {
+            state.channel_sections = sections;
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::CustomEmojiImageLoaded {
+            name,
+            png_data,
+            width,
+            height,
+        } => {
+            state.pending_emoji_images.remove(&name);
+            state.custom_emoji_images.insert(
+                name,
+                crate::state::CachedImage {
+                    png_data,
+                    width,
+                    height,
+                },
+            );
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::ApiError(err) => {
+            state.last_error = Some(err);
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::Tick => {
+            state.expire_typing();
+            HandleResult::Continue
+        }
+        Event::Resize(_, _) => {
+            state.dirty = true;
+            HandleResult::Continue
+        }
+    }
+}
+
+fn handle_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    // Ctrl+C always quits
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return HandleResult::Quit;
+    }
+
+    // Help overlay: any key dismisses it
+    if state.show_help {
+        state.show_help = false;
+        state.dirty = true;
+        return HandleResult::Continue;
+    }
+
+    match state.input_mode {
+        InputMode::Normal => handle_normal_key(key, state, client, event_tx),
+        InputMode::Insert => handle_insert_key(key, state, client, event_tx),
+        InputMode::Search => handle_search_key(key, state, client, event_tx),
+        InputMode::MessageSearch => handle_message_search_key(key, state),
+        InputMode::Reaction => handle_reaction_key(key, state, client, event_tx),
+        InputMode::EmojiPicker => handle_emoji_picker_key(key, state, client, event_tx),
+    }
+}
+
+// ── Normal mode ─────────────────────────────────────────────────────────────
+
+fn handle_normal_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+
+    match state.focus {
+        Focus::ChannelList => handle_normal_channels(key, state, client, event_tx),
+        Focus::Messages => handle_normal_messages(key, state, client, event_tx),
+        Focus::Thread => handle_normal_thread(key, state, client, event_tx),
+        Focus::Input => {
+            // Shouldn't be in Normal mode with Input focus, switch to insert
+            state.input_mode = InputMode::Insert;
+            HandleResult::Continue
+        }
+    }
+}
+
+fn handle_normal_channels<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    match key.code {
+        KeyCode::Char('q') => return HandleResult::Quit,
+        KeyCode::Char('?') => {
+            state.show_help = true;
+        }
+        KeyCode::Char('F') => {
+            state.show_fps = !state.show_fps;
+        }
+        // Navigation
+        KeyCode::Char('j') | KeyCode::Down => state.channel_next(),
+        KeyCode::Char('k') | KeyCode::Up => state.channel_prev(),
+        KeyCode::Char('G') | KeyCode::End => {
+            if !state.channels.is_empty() {
+                state.selected_channel_idx = state.channels.len() - 1;
+            }
+        }
+        KeyCode::Char('g') | KeyCode::Home => {
+            state.selected_channel_idx = 0;
+        }
+        KeyCode::PageDown => {
+            let page = 15;
+            let max = state.channels.len().saturating_sub(1);
+            state.selected_channel_idx = (state.selected_channel_idx + page).min(max);
+        }
+        KeyCode::PageUp => {
+            let page = 15;
+            state.selected_channel_idx = state.selected_channel_idx.saturating_sub(page);
+        }
+        // Open channel / toggle section
+        KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+            // Check if the currently selected visual item is a section header or DmMore
+            let visual_entry = find_selected_visual_entry(state);
+            match visual_entry {
+                Some(crate::state::ChannelListEntry::SectionHeader(ref id))
+                    if id != "__channels__" && id != "__dm__" =>
+                {
+                    state.toggle_section_collapse(id);
+                }
+                Some(crate::state::ChannelListEntry::DmMore) => {
+                    state.dm_list_expanded = true;
+                    state.dirty = true;
+                }
+                _ => {
+                    state.focus = Focus::Messages;
+                    state.selected_message_idx = 0;
+                    ensure_history_loaded(state, client, event_tx);
+                }
+            }
+        }
+        // Search
+        KeyCode::Char('/') => {
+            state.input_mode = InputMode::Search;
+            state.channel_filter.clear();
+            state.channel_filter_active = true;
+        }
+        // Insert mode (from channels → always to channel)
+        KeyCode::Char('i') | KeyCode::Char('a') => {
+            state.reply_to_thread = false;
+            state.focus = Focus::Input;
+            state.input_mode = InputMode::Insert;
+            ensure_history_loaded(state, client, event_tx);
+        }
+        // Cycle focus
+        KeyCode::Tab => {
+            state.focus = Focus::Messages;
+            ensure_history_loaded(state, client, event_tx);
+        }
+        // Unread navigation
+        KeyCode::Char('}') => {
+            state.next_unread_channel();
+        }
+        KeyCode::Char('{') => {
+            state.prev_unread_channel();
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+/// Find the visual channel list entry corresponding to the currently selected channel.
+fn find_selected_visual_entry(state: &AppState) -> Option<crate::state::ChannelListEntry> {
+    // Find the visual item that corresponds to the selected channel
+    state
+        .channel_list_items
+        .iter()
+        .find(|entry| matches!(entry, crate::state::ChannelListEntry::Channel(idx) if *idx == state.selected_channel_idx))
+        .cloned()
+}
+
+fn handle_normal_messages<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    // Ctrl modifiers
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') | KeyCode::Char('f') => {
+                // Half/full page down (newer messages)
+                let page = if key.code == KeyCode::Char('f') { 15 } else { 8 };
+                state.message_select_page(page);
+            }
+            KeyCode::Char('u') | KeyCode::Char('b') => {
+                // Half/full page up (older messages)
+                let page = if key.code == KeyCode::Char('b') { 15 } else { 8 };
+                state.message_select_page(-page);
+                maybe_load_older(state, client, event_tx);
+            }
+            _ => {}
+        }
+        return HandleResult::Continue;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => return HandleResult::Quit,
+        KeyCode::Char('?') => {
+            state.show_help = true;
+        }
+        KeyCode::Char('F') => {
+            state.show_fps = !state.show_fps;
+        }
+        // Message selection (j/k navigate between messages)
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.message_select_newer();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.message_select_older();
+            maybe_load_older(state, client, event_tx);
+        }
+        KeyCode::Char('G') | KeyCode::End => {
+            state.selected_message_idx = 0; // newest
+        }
+        KeyCode::Char('g') | KeyCode::Home => {
+            let max = state.message_count().saturating_sub(1);
+            state.selected_message_idx = max; // oldest
+            maybe_load_older(state, client, event_tx);
+        }
+        KeyCode::PageDown => {
+            state.message_select_page(15);
+        }
+        KeyCode::PageUp => {
+            state.message_select_page(-15);
+            maybe_load_older(state, client, event_tx);
+        }
+        // Back to channel list
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Esc => {
+            state.focus = Focus::ChannelList;
+            state.clear_message_search();
+        }
+        // Open thread for selected message
+        KeyCode::Enter | KeyCode::Char('l') => {
+            open_thread_for_selected(state, client, event_tx);
+        }
+        // Reply in thread (open thread + insert mode)
+        KeyCode::Char('R') => {
+            open_thread_for_selected(state, client, event_tx);
+            state.reply_to_thread = true;
+            state.input_mode = InputMode::Insert;
+            state.focus = Focus::Input;
+        }
+        // Insert mode (from messages → always to channel, not thread)
+        KeyCode::Char('i') | KeyCode::Char('a') => {
+            state.reply_to_thread = false;
+            state.focus = Focus::Input;
+            state.input_mode = InputMode::Insert;
+        }
+        // Reaction via emoji picker
+        KeyCode::Char('r') => {
+            if state.selected_message().is_some() {
+                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction);
+            }
+        }
+        // Message search
+        KeyCode::Char('/') => {
+            state.input_mode = InputMode::MessageSearch;
+            state.message_search_query.clear();
+            state.message_search_results.clear();
+            state.message_search_idx = 0;
+        }
+        // Navigate search results
+        KeyCode::Char('n') => {
+            if state.message_search_active {
+                state.message_search_next();
+            }
+        }
+        KeyCode::Char('N') => {
+            if state.message_search_active {
+                state.message_search_prev();
+            }
+        }
+        // Cycle focus
+        KeyCode::Tab => {
+            if state.thread_channel_id.is_some() {
+                state.focus = Focus::Thread;
+            } else {
+                state.focus = Focus::ChannelList;
+            }
+        }
+        KeyCode::BackTab => {
+            state.focus = Focus::ChannelList;
+        }
+        // Channel navigation from messages view
+        KeyCode::Char(']') => {
+            state.channel_next();
+            state.selected_message_idx = 0;
+            state.clear_message_search();
+            ensure_history_loaded(state, client, event_tx);
+        }
+        KeyCode::Char('[') => {
+            state.channel_prev();
+            state.selected_message_idx = 0;
+            state.clear_message_search();
+            ensure_history_loaded(state, client, event_tx);
+        }
+        KeyCode::Char('}') => {
+            if state.next_unread_channel() {
+                state.selected_message_idx = 0;
+                state.clear_message_search();
+                ensure_history_loaded(state, client, event_tx);
+            }
+        }
+        KeyCode::Char('{') => {
+            if state.prev_unread_channel() {
+                state.selected_message_idx = 0;
+                state.clear_message_search();
+                ensure_history_loaded(state, client, event_tx);
+            }
+        }
+        // Copy selected message to clipboard (OSC 52)
+        KeyCode::Char('y') => {
+            if let Some(msg) = state.selected_message() {
+                let text = msg.text.clone();
+                state.clipboard_pending = Some(text);
+            }
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+fn handle_normal_thread<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    // Ctrl modifiers for page scroll
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') | KeyCode::Char('f') => {
+                state.thread_scroll_offset = state
+                    .thread_scroll_offset
+                    .saturating_sub(state.thread_max_scroll_offset.min(40) / 2);
+            }
+            KeyCode::Char('u') | KeyCode::Char('b') => {
+                let amount = state.thread_max_scroll_offset.min(40) / 2;
+                state.thread_scroll_offset =
+                    (state.thread_scroll_offset + amount).min(state.thread_max_scroll_offset);
+            }
+            _ => {}
+        }
+        return HandleResult::Continue;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => return HandleResult::Quit,
+        KeyCode::Char('?') => {
+            state.show_help = true;
+        }
+        KeyCode::Char('F') => {
+            state.show_fps = !state.show_fps;
+        }
+        // Close thread
+        KeyCode::Esc | KeyCode::Char('h') => {
+            state.close_thread();
+        }
+        // Scroll
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.thread_scroll_offset = state.thread_scroll_offset.saturating_sub(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.thread_scroll_offset =
+                (state.thread_scroll_offset + 1).min(state.thread_max_scroll_offset);
+        }
+        KeyCode::Char('G') | KeyCode::End => {
+            state.thread_scroll_offset = 0;
+        }
+        KeyCode::Char('g') | KeyCode::Home => {
+            state.thread_scroll_offset = state.thread_max_scroll_offset;
+        }
+        KeyCode::PageDown => {
+            let page = 15;
+            state.thread_scroll_offset = state.thread_scroll_offset.saturating_sub(page);
+        }
+        KeyCode::PageUp => {
+            let page = 15;
+            state.thread_scroll_offset =
+                (state.thread_scroll_offset + page).min(state.thread_max_scroll_offset);
+        }
+        // Insert mode (from thread → always reply to thread)
+        KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Char('R') => {
+            state.reply_to_thread = true;
+            state.focus = Focus::Input;
+            state.input_mode = InputMode::Insert;
+        }
+        // Reaction via emoji picker (on thread parent for now)
+        KeyCode::Char('r') => {
+            if state.thread_parent_ts.is_some() && state.thread_channel_id.is_some() {
+                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction);
+            }
+        }
+        // Cycle focus
+        KeyCode::Tab => {
+            state.focus = Focus::Messages;
+        }
+        KeyCode::BackTab => {
+            state.focus = Focus::ChannelList;
+        }
+        // Channel navigation from thread
+        KeyCode::Char(']') => {
+            state.close_thread();
+            state.channel_next();
+            state.selected_message_idx = 0;
+            ensure_history_loaded(state, client, event_tx);
+        }
+        KeyCode::Char('[') => {
+            state.close_thread();
+            state.channel_prev();
+            state.selected_message_idx = 0;
+            ensure_history_loaded(state, client, event_tx);
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Insert mode ─────────────────────────────────────────────────────────────
+
+fn handle_insert_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+
+    // Ctrl modifiers for input editing
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('w') => delete_word_backward(state),
+            KeyCode::Char('u') => {
+                state.input_text.drain(..state.input_cursor);
+                state.input_cursor = 0;
+            }
+            KeyCode::Char('k') => {
+                state.input_text.truncate(state.input_cursor);
+            }
+            KeyCode::Char('a') => {
+                state.input_cursor = 0;
+            }
+            KeyCode::Char('e') => {
+                // Ctrl+e: if there's no text or cursor is at end, open emoji picker
+                // Otherwise jump to end of line (standard behavior)
+                if state.input_cursor == state.input_text.len() {
+                    state.open_emoji_picker(crate::state::EmojiPickerSource::Insert);
+                    return HandleResult::Continue;
+                }
+                state.input_cursor = state.input_text.len();
+            }
+            KeyCode::Char('p') => {
+                state.input_history_prev();
+            }
+            KeyCode::Char('n') => {
+                state.input_history_next();
+            }
+            _ => {}
+        }
+        return HandleResult::Continue;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Normal;
+            if state.thread_channel_id.is_some() && state.focus == Focus::Input {
+                state.focus = Focus::Thread;
+            } else {
+                state.focus = Focus::Messages;
+            }
+        }
+        KeyCode::Enter => {
+            let text = state.input_text.trim().to_string();
+            if !text.is_empty() {
+                let thread_ts = if state.reply_to_thread {
+                    state.thread_parent_ts.clone()
+                } else {
+                    None
+                };
+
+                if let Some(channel_id) = state.active_channel_id() {
+                    spawn_send_message(
+                        client,
+                        &channel_id,
+                        &text,
+                        thread_ts.as_deref(),
+                        event_tx,
+                    );
+                    state.save_input_to_history();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if state.input_cursor > 0 {
+                state.input_cursor -= 1;
+                state.input_text.remove(state.input_cursor);
+            }
+        }
+        KeyCode::Delete => {
+            if state.input_cursor < state.input_text.len() {
+                state.input_text.remove(state.input_cursor);
+            }
+        }
+        KeyCode::Left => {
+            if state.input_cursor > 0 {
+                state.input_cursor -= 1;
+            }
+        }
+        KeyCode::Right => {
+            if state.input_cursor < state.input_text.len() {
+                state.input_cursor += 1;
+            }
+        }
+        KeyCode::Up => state.input_history_prev(),
+        KeyCode::Down => state.input_history_next(),
+        KeyCode::Home => state.input_cursor = 0,
+        KeyCode::End => state.input_cursor = state.input_text.len(),
+        KeyCode::Char(c) => {
+            state.input_text.insert(state.input_cursor, c);
+            state.input_cursor += 1;
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Channel search mode ─────────────────────────────────────────────────────
+
+fn handle_search_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Normal;
+            state.channel_filter.clear();
+            state.channel_filter_active = false;
+        }
+        KeyCode::Enter => {
+            state.input_mode = InputMode::Normal;
+            state.channel_filter.clear();
+            state.channel_filter_active = false;
+            state.focus = Focus::Messages;
+            state.selected_message_idx = 0;
+            ensure_history_loaded(state, client, event_tx);
+        }
+        KeyCode::Backspace => {
+            state.channel_filter.pop();
+            let indices = state.filtered_channel_indices();
+            if let Some(&first) = indices.first() {
+                state.selected_channel_idx = first;
+            }
+        }
+        KeyCode::Down | KeyCode::Tab => state.filtered_channel_next(),
+        KeyCode::Up | KeyCode::BackTab => state.filtered_channel_prev(),
+        KeyCode::Char(c) => {
+            state.channel_filter.push(c);
+            let indices = state.filtered_channel_indices();
+            if let Some(&first) = indices.first() {
+                state.selected_channel_idx = first;
+            }
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Message search mode ─────────────────────────────────────────────────────
+
+fn handle_message_search_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Normal;
+            state.clear_message_search();
+        }
+        KeyCode::Enter => {
+            // Confirm search — keep results highlighted, return to normal
+            state.input_mode = InputMode::Normal;
+            if !state.message_search_query.is_empty() {
+                state.message_search_active = true;
+                state.perform_message_search();
+                // Jump to first result
+                if !state.message_search_results.is_empty() {
+                    state.jump_to_search_result();
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            state.message_search_query.pop();
+            state.perform_message_search();
+        }
+        // Navigate results while typing
+        KeyCode::Down | KeyCode::Tab => {
+            state.message_search_active = true;
+            state.perform_message_search();
+            state.message_search_next();
+        }
+        KeyCode::Up | KeyCode::BackTab => {
+            state.message_search_active = true;
+            state.perform_message_search();
+            state.message_search_prev();
+        }
+        KeyCode::Char(c) => {
+            state.message_search_query.push(c);
+            state.perform_message_search();
+            // Auto-jump to first result as user types
+            if !state.message_search_results.is_empty() {
+                state.message_search_active = true;
+                state.message_search_idx = 0;
+                state.jump_to_search_result();
+            }
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Reaction mode ───────────────────────────────────────────────────────────
+
+fn handle_reaction_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Normal;
+            state.reaction_input.clear();
+        }
+        KeyCode::Enter => {
+            let emoji = state.reaction_input.trim().to_string();
+            if !emoji.is_empty() {
+                if let Some(msg) = state.selected_message() {
+                    let ts = msg.ts.clone();
+                    if let Some(channel_id) = state.active_channel_id() {
+                        spawn_add_reaction(client, &channel_id, &ts, &emoji, event_tx);
+                    }
+                }
+            }
+            state.input_mode = InputMode::Normal;
+            state.reaction_input.clear();
+        }
+        KeyCode::Backspace => {
+            state.reaction_input.pop();
+        }
+        KeyCode::Char(c) => {
+            state.reaction_input.push(c);
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Emoji picker mode ──────────────────────────────────────────────────
+
+fn handle_emoji_picker_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Enter => {
+            if let Some((name, _display, _is_custom)) = state
+                .emoji_picker_results
+                .get(state.emoji_picker_selected)
+                .cloned()
+            {
+                match state.emoji_picker_source {
+                    crate::state::EmojiPickerSource::Reaction => {
+                        // Add reaction to selected message
+                        if state.focus == Focus::Thread {
+                            if let (Some(channel_id), Some(ts)) = (
+                                state.thread_parent_ts.clone().and_then(|_| state.thread_channel_id.clone()),
+                                state.thread_parent_ts.clone(),
+                            ) {
+                                spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
+                            }
+                        } else if let Some(msg) = state.selected_message() {
+                            let ts = msg.ts.clone();
+                            if let Some(channel_id) = state.active_channel_id() {
+                                spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
+                            }
+                        }
+                        state.input_mode = InputMode::Normal;
+                    }
+                    crate::state::EmojiPickerSource::Insert => {
+                        // Insert :name: at cursor position
+                        let insert = format!(":{}:", name);
+                        state.input_text.insert_str(state.input_cursor, &insert);
+                        state.input_cursor += insert.len();
+                        state.input_mode = InputMode::Insert;
+                        state.focus = Focus::Input;
+                    }
+                }
+            } else {
+                state.input_mode = InputMode::Normal;
+            }
+        }
+        KeyCode::Backspace => {
+            state.emoji_picker_query.pop();
+            state.filter_emoji_picker();
+        }
+        KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !state.emoji_picker_results.is_empty() {
+                state.emoji_picker_selected =
+                    (state.emoji_picker_selected + 1) % state.emoji_picker_results.len();
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !state.emoji_picker_results.is_empty() {
+                if state.emoji_picker_selected == 0 {
+                    state.emoji_picker_selected = state.emoji_picker_results.len() - 1;
+                } else {
+                    state.emoji_picker_selected -= 1;
+                }
+            }
+        }
+        KeyCode::PageDown => {
+            let page = 15;
+            if !state.emoji_picker_results.is_empty() {
+                state.emoji_picker_selected = (state.emoji_picker_selected + page)
+                    .min(state.emoji_picker_results.len() - 1);
+            }
+        }
+        KeyCode::PageUp => {
+            let page = 15;
+            state.emoji_picker_selected = state.emoji_picker_selected.saturating_sub(page);
+        }
+        KeyCode::Tab => {
+            if !state.emoji_picker_results.is_empty() {
+                state.emoji_picker_selected =
+                    (state.emoji_picker_selected + 1) % state.emoji_picker_results.len();
+            }
+        }
+        KeyCode::BackTab => {
+            if !state.emoji_picker_results.is_empty() {
+                if state.emoji_picker_selected == 0 {
+                    state.emoji_picker_selected = state.emoji_picker_results.len() - 1;
+                } else {
+                    state.emoji_picker_selected -= 1;
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            state.emoji_picker_query.push(c);
+            state.filter_emoji_picker();
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn open_thread_for_selected<C: SlackApi>(
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    if let Some(msg) = state.selected_message() {
+        let ts = msg
+            .thread_ts
+            .clone()
+            .unwrap_or_else(|| msg.ts.clone());
+        if let Some(channel_id) = state.active_channel_id() {
+            spawn_load_thread(client, &channel_id, &ts, event_tx);
+            state.open_thread(channel_id, ts);
+        }
+    }
+}
+
+fn delete_word_backward(state: &mut AppState) {
+    if state.input_cursor == 0 {
+        return;
+    }
+    let mut pos = state.input_cursor;
+    while pos > 0 && state.input_text.as_bytes()[pos - 1] == b' ' {
+        pos -= 1;
+    }
+    while pos > 0 && state.input_text.as_bytes()[pos - 1] != b' ' {
+        pos -= 1;
+    }
+    state.input_text.drain(pos..state.input_cursor);
+    state.input_cursor = pos;
+}
+
+// ── WebSocket events ────────────────────────────────────────────────────────
+
+fn handle_ws_event(ws_event: WsEvent, state: &mut AppState) {
+    match ws_event {
+        WsEvent::Hello => {
+            state.connected = true;
+            state.dirty = true;
+        }
+        WsEvent::Goodbye => {
+            state.connected = false;
+            state.dirty = true;
+        }
+        WsEvent::Message(ws_msg) => handle_ws_message(ws_msg, state),
+        WsEvent::ReactionAdded(reaction) => {
+            if let (Some(item), Some(reaction_name), Some(user)) =
+                (reaction.item, reaction.reaction, reaction.user)
+            {
+                if let (Some(channel), Some(ts)) = (item.channel, item.ts) {
+                    state.add_reaction(&channel, &ts, &reaction_name, &user);
+                }
+            }
+        }
+        WsEvent::ReactionRemoved(reaction) => {
+            if let (Some(item), Some(reaction_name), Some(user)) =
+                (reaction.item, reaction.reaction, reaction.user)
+            {
+                if let (Some(channel), Some(ts)) = (item.channel, item.ts) {
+                    state.remove_reaction(&channel, &ts, &reaction_name, &user);
+                }
+            }
+        }
+        WsEvent::ChannelMarked(marked) => {
+            if let (Some(channel), Some(ts)) = (marked.channel, marked.ts) {
+                state.mark_channel_read(&channel, &ts);
+            }
+        }
+        WsEvent::UserTyping(typing) => {
+            if let (Some(channel), Some(user)) = (typing.channel, typing.user) {
+                state.record_typing(&channel, &user);
+            }
+        }
+        WsEvent::PresenceChange(_) => {}
+        WsEvent::Error(_) => {}
+    }
+}
+
+fn handle_ws_message(ws_msg: WsMessage, state: &mut AppState) {
+    let channel_id = match ws_msg.channel.as_ref() {
+        Some(c) => c.clone(),
+        None => return,
+    };
+
+    // Check if we should show a desktop notification before consuming fields
+    let should_notify = ws_msg
+        .user
+        .as_ref()
+        .map(|u| u != &state.self_user_id)
+        .unwrap_or(false)
+        && ws_msg.subtype.is_none()
+        && state.active_channel_id().as_deref() != Some(&channel_id);
+
+    let notify_sender = if should_notify {
+        ws_msg.user.as_ref().map(|uid| state.user_display_name(uid).to_string())
+    } else {
+        None
+    };
+    let notify_channel = if should_notify {
+        state
+            .channels
+            .iter()
+            .find(|c| c.id == channel_id)
+            .map(|c| {
+                if c.is_im {
+                    "DM".to_string()
+                } else {
+                    format!("#{}", c.display_name())
+                }
+            })
+    } else {
+        None
+    };
+    let notify_text = if should_notify {
+        let text = &ws_msg.text;
+        if text.len() > 100 {
+            format!("{}...", &text[..97])
+        } else {
+            text.clone()
+        }
+    } else {
+        String::new()
+    };
+
+    let msg = crate::slack::types::Message {
+        user: ws_msg.user,
+        text: ws_msg.text,
+        ts: ws_msg.ts,
+        thread_ts: ws_msg.thread_ts,
+        reply_count: None,
+        reactions: Vec::new(),
+        edited: None,
+        subtype: ws_msg.subtype,
+        bot_id: None,
+        username: None,
+        files: Vec::new(),
+    };
+
+    state.push_message(channel_id, msg);
+    state.channels_need_resort = true;
+
+    // Fire desktop notification (fire-and-forget)
+    if let (Some(sender), Some(channel)) = (notify_sender, notify_channel) {
+        tokio::spawn(async move {
+            let _ = notify_rust::Notification::new()
+                .summary(&format!("{} in {}", sender, channel))
+                .body(&notify_text)
+                .appname("slackslack")
+                .timeout(notify_rust::Timeout::Milliseconds(5000))
+                .show();
+        });
+    }
+}
+
+// ── API spawners ────────────────────────────────────────────────────────────
+
+fn ensure_history_loaded<C: SlackApi>(
+    state: &AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    if let Some(channel_id) = state.active_channel_id() {
+        if !state.channel_data.contains_key(&channel_id) {
+            spawn_load_history(client, &channel_id, event_tx);
+        }
+    }
+}
+
+fn maybe_load_older<C: SlackApi>(
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    if let Some(channel_id) = state.active_channel_id() {
+        let max = state.message_count().saturating_sub(1);
+        let near_top = state.selected_message_idx >= max.saturating_sub(5);
+
+        if let Some(cd) = state.channel_data.get(&channel_id) {
+            if near_top && cd.has_more_history && !cd.loading_more_history {
+                if let Some(oldest) = cd.messages.front() {
+                    let oldest_ts = oldest.ts.clone();
+                    state.channel_data_mut(&channel_id).loading_more_history = true;
+                    spawn_load_older_history(client, &channel_id, &oldest_ts, event_tx);
+                }
+            }
+        }
+    }
+}
+
+fn mark_channel_read<C: SlackApi>(
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+    channel_id: &str,
+) {
+    let latest_ts = state
+        .channel_data.get(channel_id)
+        .and_then(|cd| cd.messages.back())
+        .map(|m| m.ts.clone());
+
+    if let Some(ts) = latest_ts {
+        state.mark_channel_read(channel_id, &ts);
+        spawn_mark_read(client, channel_id, &ts, event_tx);
+    }
+}
+
+fn spawn_load_history<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client
+            .conversations_history(&channel_id, 50, None, None)
+            .await
+        {
+            Ok(data) => {
+                let _ = tx.send(Event::HistoryLoaded {
+                    channel_id,
+                    messages: data.messages,
+                    has_more: data.has_more,
+                });
+            }
+            Err(e) => {
+                error!("Failed to load history: {}", e);
+                let _ = tx.send(Event::ApiError(format!("History: {}", e)));
+            }
+        }
+    });
+}
+
+fn spawn_load_older_history<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    oldest_ts: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let latest = oldest_ts.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client
+            .conversations_history(&channel_id, 50, None, Some(&latest))
+            .await
+        {
+            Ok(data) => {
+                let _ = tx.send(Event::OlderHistoryLoaded {
+                    channel_id,
+                    messages: data.messages,
+                    has_more: data.has_more,
+                });
+            }
+            Err(e) => {
+                error!("Failed to load older history: {}", e);
+                let _ = tx.send(Event::ApiError(format!("Older history: {}", e)));
+            }
+        }
+    });
+}
+
+fn spawn_load_thread<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    thread_ts: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let thread_ts = thread_ts.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client
+            .conversations_replies(&channel_id, &thread_ts, 100)
+            .await
+        {
+            Ok(data) => {
+                let _ = tx.send(Event::ThreadLoaded {
+                    channel_id,
+                    thread_ts,
+                    messages: data.messages,
+                });
+            }
+            Err(e) => {
+                error!("Failed to load thread: {}", e);
+                let _ = tx.send(Event::ApiError(format!("Thread: {}", e)));
+            }
+        }
+    });
+}
+
+fn spawn_send_message<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    text: &str,
+    thread_ts: Option<&str>,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let text = text.to_string();
+    let thread_ts = thread_ts.map(|s| s.to_string());
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client
+            .chat_post_message(&channel_id, &text, thread_ts.as_deref())
+            .await
+        {
+            Ok(data) => {
+                let _ = tx.send(Event::MessageSent {
+                    channel_id,
+                    ts: data.ts.unwrap_or_default(),
+                });
+            }
+            Err(e) => {
+                error!("Failed to send message: {}", e);
+                let _ = tx.send(Event::ApiError(format!("Send: {}", e)));
+            }
+        }
+    });
+}
+
+fn spawn_mark_read<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    ts: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let ts = ts.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client.conversations_mark(&channel_id, &ts).await {
+            Ok(_) => {
+                let _ = tx.send(Event::ChannelMarked { channel_id });
+            }
+            Err(e) => {
+                error!("Failed to mark channel: {}", e);
+            }
+        }
+    });
+}
+
+fn spawn_add_reaction<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    ts: &str,
+    emoji: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let ts = ts.to_string();
+    let emoji = emoji.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = client.reactions_add(&channel_id, &ts, &emoji).await {
+            error!("Failed to add reaction: {}", e);
+            let _ = tx.send(Event::ApiError(format!("Reaction: {}", e)));
+        }
+    });
+}
+
+fn trigger_image_downloads<C: SlackApi>(
+    state: &mut AppState,
+    channel_id: &str,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    if let Some(msgs) = state.channel_data.get(channel_id).map(|cd| &cd.messages) {
+        let urls: Vec<String> = msgs
+            .iter()
+            .flat_map(|msg| {
+                msg.files.iter().filter_map(|f| {
+                    if f.is_image() {
+                        f.best_thumb_url().map(|u| u.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .filter(|url| {
+                !state.image_cache.contains_key(url) && !state.pending_images.contains(url)
+            })
+            .collect();
+
+        for url in urls {
+            state.pending_images.insert(url.clone());
+            spawn_download_image(client, &url, event_tx);
+        }
+    }
+}
+
+fn trigger_emoji_image_downloads<C: SlackApi>(
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    // Download direct URLs (not aliases), limited to first 200
+    let to_download: Vec<(String, String)> = state
+        .custom_emoji
+        .iter()
+        .filter(|(_, val)| !val.starts_with("alias:"))
+        .filter(|(name, _)| {
+            !state.custom_emoji_images.contains_key(*name)
+                && !state.pending_emoji_images.contains(*name)
+        })
+        .take(200)
+        .map(|(name, url)| (name.clone(), url.clone()))
+        .collect();
+
+    for (name, url) in to_download {
+        state.pending_emoji_images.insert(name.clone());
+        spawn_download_emoji_image(client, &name, &url, event_tx);
+    }
+}
+
+fn spawn_download_emoji_image<C: SlackApi>(
+    client: &C,
+    name: &str,
+    url: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let name = name.to_string();
+    let url = url.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client.download_file(&url).await {
+            Ok(data) => {
+                if let Some((png_data, width, height)) = crate::ui::images::encode_as_png(&data) {
+                    let _ = tx.send(Event::CustomEmojiImageLoaded {
+                        name,
+                        png_data,
+                        width,
+                        height,
+                    });
+                }
+            }
+            Err(e) => {
+                error!("Failed to download emoji {}: {}", name, e);
+            }
+        }
+    });
+}
+
+fn spawn_download_image<C: SlackApi>(
+    client: &C,
+    url: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let url = url.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client.download_file(&url).await {
+            Ok(data) => {
+                if let Some((png_data, width, height)) = crate::ui::images::encode_as_png(&data) {
+                    let _ = tx.send(Event::ImageLoaded {
+                        url,
+                        png_data,
+                        width,
+                        height,
+                    });
+                } else {
+                    error!("Failed to decode image: {}", url);
+                }
+            }
+            Err(e) => {
+                error!("Failed to download image {}: {}", url, e);
+            }
+        }
+    });
+}
+
+pub enum HandleResult {
+    Continue,
+    Quit,
+}
