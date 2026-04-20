@@ -1,7 +1,7 @@
 use super::harness::*;
 use super::mock_client::ApiCall;
 use crate::event::Event;
-use crate::slack::types::{WsEvent, WsMessage};
+use crate::slack::types::{Reaction, WsEvent, WsMessage};
 use crate::state::{Focus, InputMode};
 use crossterm::event::KeyCode;
 
@@ -1187,7 +1187,7 @@ async fn user_picker_confirm_inserts_mention() {
     h.assert_mode(InputMode::Insert);
     // Should have inserted a mention
     let text = h.input_text().to_string();
-    assert!(text.contains("<@U_ALICE>"), "expected mention in input, got: {}", text);
+    assert!(text.contains("<@U_ALICE|Alice>"), "expected mention in input, got: {}", text);
 }
 
 // ── Message sent event ─────────────────────────────────────────────────
@@ -1281,4 +1281,662 @@ async fn own_message_does_not_increment_unread() {
     h.send_event(ws_msg("C_RAND", "U_ME", "my own msg", "2002.000", None));
     let after = h.state.channels.iter().find(|c| c.id == "C_RAND").unwrap().unread_count_display;
     assert_eq!(after, before, "own messages should not increment unread count");
+}
+
+// ── Unicode cursor safety ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn typing_emoji_cursor_position() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    // Type an emoji (multi-byte char)
+    h.press_char('\u{1F600}'); // 😀
+    assert_eq!(h.state.input_cursor, 1);
+    assert_eq!(h.input_text(), "\u{1F600}");
+    h.press_char('a');
+    assert_eq!(h.state.input_cursor, 2);
+    assert_eq!(h.input_text(), "\u{1F600}a");
+}
+
+#[tokio::test]
+async fn backspace_multibyte() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("a\u{1F600}b");
+    assert_eq!(h.state.input_cursor, 3);
+    h.press_key(KeyCode::Backspace);
+    assert_eq!(h.input_text(), "a\u{1F600}");
+    h.press_key(KeyCode::Backspace);
+    assert_eq!(h.input_text(), "a");
+}
+
+#[tokio::test]
+async fn word_nav_unicode() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("héllo wörld");
+    // cursor at end (char count)
+    assert_eq!(h.state.input_cursor, h.state.input_char_count());
+    h.press_alt('b'); // word backward
+    assert_eq!(h.state.input_cursor, 6); // before 'wörld'
+    h.press_alt('b');
+    assert_eq!(h.state.input_cursor, 0); // beginning
+    h.press_alt('f'); // word forward
+    assert_eq!(h.state.input_cursor, 6); // after 'héllo '
+}
+
+#[tokio::test]
+async fn delete_word_backward_unicode() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("café latte");
+    h.press_ctrl('w');
+    assert_eq!(h.input_text(), "café ");
+    h.press_ctrl('w');
+    assert_eq!(h.input_text(), "");
+}
+
+#[tokio::test]
+async fn ctrl_u_unicode() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("🎉hello");
+    // Move cursor to after the emoji (position 1)
+    h.press_key(KeyCode::Home);
+    h.press_key(KeyCode::Right);
+    assert_eq!(h.state.input_cursor, 1);
+    h.press_ctrl('u');
+    assert_eq!(h.input_text(), "hello");
+    assert_eq!(h.state.input_cursor, 0);
+}
+
+#[tokio::test]
+async fn ctrl_k_unicode() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("hi🌍bye");
+    h.press_key(KeyCode::Home);
+    h.press_key(KeyCode::Right);
+    h.press_key(KeyCode::Right);
+    assert_eq!(h.state.input_cursor, 2);
+    h.press_ctrl('k');
+    assert_eq!(h.input_text(), "hi");
+}
+
+// ── Multiline input ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn shift_enter_inserts_newline() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("hello");
+    h.send_event(Event::Key(crossterm::event::KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: crossterm::event::KeyModifiers::SHIFT,
+        kind: crossterm::event::KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }));
+    h.type_text("world");
+    assert_eq!(h.input_text(), "hello\nworld");
+}
+
+#[tokio::test]
+async fn enter_sends_multiline() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    h.press_char('i');
+    h.type_text("line1");
+    h.send_event(Event::Key(crossterm::event::KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: crossterm::event::KeyModifiers::SHIFT,
+        kind: crossterm::event::KeyEventKind::Press,
+        state: crossterm::event::KeyEventState::NONE,
+    }));
+    h.type_text("line2");
+    assert_eq!(h.input_text(), "line1\nline2");
+    h.press_enter(); // send
+    h.yield_to_spawned_tasks().await;
+    let calls = h.api_calls();
+    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    match post {
+        Some(ApiCall::PostMessage { text, .. }) => {
+            assert_eq!(text, "line1\nline2");
+        }
+        _ => panic!("expected PostMessage"),
+    }
+}
+
+// ── Tab toggle reply target ───────────────────────────────────────────
+
+#[tokio::test]
+async fn tab_toggles_reply_target() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    h.press_char('k'); // select middle
+    h.press_char('R'); // open thread + insert mode, reply_to_thread = true
+    assert!(h.reply_to_thread());
+    h.press_tab(); // toggle to channel
+    assert!(!h.reply_to_thread());
+    h.press_tab(); // toggle back to thread
+    assert!(h.reply_to_thread());
+}
+
+#[tokio::test]
+async fn tab_without_thread_noop() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages (no thread)
+    h.press_char('i'); // insert mode
+    assert!(!h.reply_to_thread());
+    h.press_tab(); // no thread open, should be a no-op
+    assert!(!h.reply_to_thread());
+}
+
+// ── Draft per channel ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn draft_saved_on_switch() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    h.press_char('i');
+    h.type_text("draft text");
+    h.press_esc(); // -> Normal
+    h.press_char(']'); // switch to C_RAND
+    h.assert_active_channel("C_RAND");
+    h.assert_input_empty();
+    h.press_char('['); // switch back to C_GEN
+    h.assert_active_channel("C_GEN");
+    h.assert_input_text("draft text");
+}
+
+#[tokio::test]
+async fn draft_cleared_after_send() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    h.press_char('i');
+    h.type_text("will send");
+    h.press_enter(); // send
+    h.assert_input_empty();
+    h.press_esc(); // -> Normal
+    h.press_char(']'); // C_RAND
+    h.press_char('['); // back to C_GEN
+    h.assert_input_empty(); // draft was cleared on send
+}
+
+// ── Kill ring ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ctrl_w_y_roundtrip() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("hello world");
+    h.press_ctrl('w'); // kill "world"
+    assert_eq!(h.input_text(), "hello ");
+    h.press_ctrl('y'); // yank it back
+    assert_eq!(h.input_text(), "hello world");
+}
+
+#[tokio::test]
+async fn ctrl_u_y_roundtrip() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("hello world");
+    h.press_key(KeyCode::Home);
+    h.press_key(KeyCode::Right);
+    h.press_key(KeyCode::Right);
+    h.press_key(KeyCode::Right);
+    h.press_key(KeyCode::Right);
+    h.press_key(KeyCode::Right); // cursor after "hello"
+    h.press_ctrl('u'); // kill "hello"
+    assert_eq!(h.input_text(), " world");
+    h.press_key(KeyCode::End);
+    h.press_ctrl('y'); // yank "hello" at end
+    assert_eq!(h.input_text(), " worldhello");
+}
+
+#[tokio::test]
+async fn kill_ring_bounded() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    for i in 0..20 {
+        h.type_text(&format!("word{} ", i));
+        h.press_ctrl('w');
+    }
+    assert!(h.state.kill_ring.len() <= 16);
+}
+
+// ── Line-based scroll ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn scroll_wheel_does_not_change_selection() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    let sel_before = h.selected_message_idx();
+    h.state.max_scroll_offset = 100;
+    // Positive delta increases scroll_y (toward newer/bottom)
+    assert!(h.state.messages_scroll_lines(3));
+    assert_eq!(h.selected_message_idx(), sel_before);
+    assert_eq!(h.state.messages_scroll_override, Some(3));
+}
+
+#[tokio::test]
+async fn jk_clears_scroll_override() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    h.state.max_scroll_offset = 100;
+    h.state.messages_scroll_override = Some(50);
+    h.press_char('k'); // select older
+    assert!(h.state.messages_scroll_override.is_none());
+}
+
+#[tokio::test]
+async fn scroll_lines_clamps_to_max() {
+    let mut h = setup_workspace();
+    h.state.max_scroll_offset = 10;
+    assert!(h.state.messages_scroll_lines(100));
+    assert_eq!(h.state.messages_scroll_override, Some(10));
+}
+
+#[tokio::test]
+async fn scroll_lines_clamps_to_zero() {
+    let mut h = setup_workspace();
+    h.state.max_scroll_offset = 100;
+    h.state.messages_scroll_override = Some(2);
+    assert!(h.state.messages_scroll_lines(-100));
+    assert_eq!(h.state.messages_scroll_override, Some(0));
+}
+
+/// scroll_y=0 shows the top (oldest). Higher scroll_y shows newer/bottom.
+/// ScrollUp (wheel up) should DECREASE scroll_y (show older).
+/// ScrollDown (wheel down) should INCREASE scroll_y (show newer).
+#[tokio::test]
+async fn mouse_scroll_up_decreases_scroll_y() {
+    use ratatui::layout::Rect;
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    // Set up messages area and a starting scroll position in the middle
+    let area = Rect::new(20, 0, 60, 30);
+    h.state.messages_area = area;
+    h.state.max_scroll_offset = 200;
+    h.state.messages_scroll_override = Some(100);
+    h.state.messages_render_info = Some(crate::state::MessagesRenderInfo {
+        inner_x: area.x + 1,
+        inner_y: area.y + 1,
+        inner_height: area.height - 2,
+        scroll_y: 100,
+    });
+
+    h.scroll_up_in(area);
+    // ScrollUp should decrease scroll_y (toward older/top)
+    let new_scroll = h.state.messages_scroll_override.unwrap();
+    assert!(new_scroll < 100, "ScrollUp should decrease scroll_y, got {}", new_scroll);
+}
+
+#[tokio::test]
+async fn mouse_scroll_down_increases_scroll_y() {
+    use ratatui::layout::Rect;
+    let mut h = setup_workspace();
+    h.press_enter();
+    let area = Rect::new(20, 0, 60, 30);
+    h.state.messages_area = area;
+    h.state.max_scroll_offset = 200;
+    h.state.messages_scroll_override = Some(100);
+    h.state.messages_render_info = Some(crate::state::MessagesRenderInfo {
+        inner_x: area.x + 1,
+        inner_y: area.y + 1,
+        inner_height: area.height - 2,
+        scroll_y: 100,
+    });
+
+    h.scroll_down_in(area);
+    let new_scroll = h.state.messages_scroll_override.unwrap();
+    assert!(new_scroll > 100, "ScrollDown should increase scroll_y, got {}", new_scroll);
+}
+
+#[tokio::test]
+async fn mouse_scroll_up_at_zero_stays_at_zero() {
+    use ratatui::layout::Rect;
+    let mut h = setup_workspace();
+    h.press_enter();
+    let area = Rect::new(20, 0, 60, 30);
+    h.state.messages_area = area;
+    h.state.max_scroll_offset = 200;
+    h.state.messages_scroll_override = Some(0);
+    h.state.messages_render_info = Some(crate::state::MessagesRenderInfo {
+        inner_x: area.x + 1,
+        inner_y: area.y + 1,
+        inner_height: area.height - 2,
+        scroll_y: 0,
+    });
+
+    h.scroll_up_in(area);
+    // At the top, can't scroll further up
+    assert_eq!(h.state.messages_scroll_override, Some(0));
+}
+
+#[tokio::test]
+async fn mouse_scroll_down_at_max_stays_at_max() {
+    use ratatui::layout::Rect;
+    let mut h = setup_workspace();
+    h.press_enter();
+    let area = Rect::new(20, 0, 60, 30);
+    h.state.messages_area = area;
+    h.state.max_scroll_offset = 200;
+    h.state.messages_scroll_override = Some(200);
+    h.state.messages_render_info = Some(crate::state::MessagesRenderInfo {
+        inner_x: area.x + 1,
+        inner_y: area.y + 1,
+        inner_height: area.height - 2,
+        scroll_y: 200,
+    });
+
+    h.scroll_down_in(area);
+    assert_eq!(h.state.messages_scroll_override, Some(200));
+}
+
+/// Channel list scroll must not wrap around.
+#[tokio::test]
+async fn channel_scroll_does_not_wrap() {
+    use ratatui::layout::Rect;
+    let mut h = setup_workspace();
+    let area = Rect::new(0, 0, 20, 30);
+    h.state.channel_list_area = area;
+
+    // Go to last channel
+    let last = h.state.channels.len() - 1;
+    h.state.selected_channel_idx = last;
+    let before = h.state.selected_channel_idx;
+    h.scroll_down_in(area);
+    // Should NOT wrap to first channel
+    assert!(
+        h.state.selected_channel_idx >= before || h.state.selected_channel_idx == before,
+        "channel scroll down at bottom should not wrap"
+    );
+
+    // Go to first channel
+    h.state.selected_channel_idx = 0;
+    h.state.selected_visual_idx = 0;
+    let before = h.state.selected_channel_idx;
+    h.scroll_up_in(area);
+    assert_eq!(
+        h.state.selected_channel_idx, before,
+        "channel scroll up at top should not wrap"
+    );
+}
+
+// ── File upload ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ctrl_o_opens_file_path_mode() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.press_ctrl('o');
+    h.assert_mode(InputMode::FilePath);
+    assert!(h.state.file_path_input.is_empty());
+}
+
+#[tokio::test]
+async fn file_path_esc_returns_to_insert() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.press_ctrl('o');
+    h.assert_mode(InputMode::FilePath);
+    h.type_text("/some/path");
+    h.press_esc();
+    h.assert_mode(InputMode::Insert);
+    assert!(h.state.file_path_input.is_empty());
+}
+
+#[tokio::test]
+async fn file_path_enter_nonexistent_shows_error() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('i');
+    h.press_ctrl('o');
+    h.type_text("/nonexistent/file.png");
+    h.press_enter();
+    assert!(h.state.upload_status.as_ref().unwrap().contains("Read error"));
+    h.assert_mode(InputMode::FilePath);
+}
+
+#[tokio::test]
+async fn file_path_upload_real_file() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    h.press_char('i');
+    h.press_ctrl('o');
+
+    // Upload Cargo.toml as a test file (it exists)
+    h.type_text("Cargo.toml");
+    h.press_enter();
+    h.yield_to_spawned_tasks().await;
+
+    let calls = h.api_calls();
+    let upload = calls.iter().find(|c| matches!(c, ApiCall::FilesUpload { .. }));
+    match upload {
+        Some(ApiCall::FilesUpload { channel, filename, .. }) => {
+            assert_eq!(channel, "C_GEN");
+            assert_eq!(filename, "Cargo.toml");
+        }
+        _ => panic!("expected FilesUpload call"),
+    }
+}
+
+// ── Context menu ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn spacebar_opens_context_menu() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages on C_GEN
+    assert!(!h.state.show_context_menu);
+    h.press_char(' ');
+    assert!(h.state.show_context_menu);
+    assert_eq!(h.state.context_menu_selected, 0);
+}
+
+#[tokio::test]
+async fn context_menu_esc_closes() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char(' ');
+    assert!(h.state.show_context_menu);
+    h.press_esc();
+    assert!(!h.state.show_context_menu);
+}
+
+#[tokio::test]
+async fn context_menu_navigate_and_select() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char(' ');
+    // Navigate down to "Reply in thread" (index 1)
+    h.press_char('j');
+    assert_eq!(h.state.context_menu_selected, 1);
+    // Navigate down to "React with emoji" (index 2)
+    h.press_char('j');
+    assert_eq!(h.state.context_menu_selected, 2);
+    // Navigate up
+    h.press_char('k');
+    assert_eq!(h.state.context_menu_selected, 1);
+    // Select "Reply in thread"
+    h.press_enter();
+    assert!(!h.state.show_context_menu);
+    assert!(h.state.reply_to_thread);
+    h.assert_mode(InputMode::Insert);
+}
+
+#[tokio::test]
+async fn context_menu_wraps_around() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char(' ');
+    // Navigate up from first item -> should wrap to last
+    h.press_char('k');
+    assert_eq!(h.state.context_menu_selected, 3); // MENU_ITEMS.len() - 1
+}
+
+// ── Reaction toggle tests ─────────────────────────────────────────────
+
+fn msg_with_reactions(text: &str, ts: &str, reactions: Vec<Reaction>) -> crate::slack::types::Message {
+    let mut m = msg(text, ts);
+    m.reactions = reactions;
+    m
+}
+
+fn setup_workspace_with_reactions() -> TestHarness {
+    let mut h = TestHarness::new();
+    h.set_self_user("U_ME");
+    h.add_user("U_ME", "me", "Me");
+    h.add_user("U_ALICE", "alice", "Alice");
+    h.add_channel("C_GEN", "general");
+    h.add_messages(
+        "C_GEN",
+        vec![
+            msg("no reactions", "1000.000"),
+            msg_with_reactions("has reactions", "1001.000", vec![
+                Reaction { name: "thumbsup".into(), count: 2, users: vec!["U_ME".into(), "U_ALICE".into()] },
+                Reaction { name: "fire".into(), count: 1, users: vec!["U_ALICE".into()] },
+            ]),
+        ],
+    );
+    h
+}
+
+#[tokio::test]
+async fn emoji_picker_toggle_removes_own_reaction() {
+    let mut h = setup_workspace_with_reactions();
+    h.press_enter(); // -> Messages (newest = "has reactions" at idx 0)
+    h.assert_selected_message("has reactions");
+    h.press_char('r'); // open emoji picker
+    h.assert_mode(InputMode::EmojiPicker);
+    // First result should be "thumbsup" (message reaction, prioritized)
+    assert_eq!(h.state.emoji_picker_results[0].0, "thumbsup");
+    // Confirm the first result — user has reacted, so this should remove
+    h.press_enter();
+    h.yield_to_spawned_tasks().await;
+    h.assert_mode(InputMode::Normal);
+    let calls = h.api_calls();
+    let remove = calls.iter().find(|c| matches!(c, ApiCall::RemoveReaction { .. }));
+    assert!(remove.is_some(), "expected RemoveReaction call, got {:?}", calls);
+}
+
+#[tokio::test]
+async fn emoji_picker_toggle_adds_others_reaction() {
+    let mut h = setup_workspace_with_reactions();
+    h.press_enter(); // -> Messages
+    h.assert_selected_message("has reactions");
+    h.press_char('r');
+    // Navigate to "fire" (2nd result) — user hasn't reacted
+    h.press_char('j');
+    assert_eq!(h.state.emoji_picker_results[h.state.emoji_picker_selected].0, "fire");
+    h.press_enter();
+    h.yield_to_spawned_tasks().await;
+    let calls = h.api_calls();
+    let add = calls.iter().find(|c| matches!(c, ApiCall::AddReaction { .. }));
+    assert!(add.is_some(), "expected AddReaction call, got {:?}", calls);
+}
+
+#[tokio::test]
+async fn emoji_picker_prepends_message_reactions() {
+    let mut h = setup_workspace_with_reactions();
+    h.press_enter();
+    h.assert_selected_message("has reactions");
+    h.press_char('r');
+    // First two results should be the message's reactions in order
+    assert_eq!(h.state.emoji_picker_results[0].0, "thumbsup");
+    assert_eq!(h.state.emoji_picker_results[1].0, "fire");
+    // Remaining results should be other emoji
+    assert_ne!(h.state.emoji_picker_results[2].0, "thumbsup");
+    assert_ne!(h.state.emoji_picker_results[2].0, "fire");
+    h.press_esc();
+}
+
+#[tokio::test]
+async fn emoji_picker_message_reactions_tracks_self() {
+    let mut h = setup_workspace_with_reactions();
+    h.press_enter();
+    h.press_char('r');
+    // thumbsup: user reacted, fire: user did not
+    let reactions = &h.state.emoji_picker_message_reactions;
+    assert_eq!(reactions.len(), 2);
+    assert_eq!(reactions[0], ("thumbsup".into(), true));
+    assert_eq!(reactions[1], ("fire".into(), false));
+    h.press_esc();
+}
+
+// --- Inline emoji picker tests ---
+
+#[tokio::test]
+async fn colon_in_insert_opens_inline_emoji_picker() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('i');
+    assert_eq!(h.state.input_mode, InputMode::Insert);
+    h.press_char(':');
+    assert_eq!(h.state.input_mode, InputMode::EmojiPicker);
+    assert_eq!(h.state.emoji_picker_inline_colon_pos, Some(0));
+    assert_eq!(h.state.input_text, ":");
+}
+
+#[tokio::test]
+async fn inline_emoji_picker_confirm_replaces_query() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('i');
+    h.press_char('h');
+    h.press_char('i');
+    h.press_char(' ');
+    h.press_char(':');
+    assert_eq!(h.state.input_mode, InputMode::EmojiPicker);
+    assert_eq!(h.state.emoji_picker_inline_colon_pos, Some(3));
+    // Type "rock" to filter to "rocket"
+    h.press_char('r');
+    h.press_char('o');
+    h.press_char('c');
+    h.press_char('k');
+    assert_eq!(h.state.input_text, "hi :rock");
+    assert!(h.state.emoji_picker_results.iter().any(|(name, _, _)| name == "rocket"));
+    // Select rocket and confirm
+    let rocket_idx = h.state.emoji_picker_results.iter().position(|(n, _, _)| n == "rocket").unwrap();
+    h.state.emoji_picker_selected = rocket_idx;
+    h.press_enter();
+    assert_eq!(h.state.input_mode, InputMode::Insert);
+    assert_eq!(h.state.input_text, "hi :rocket:");
+}
+
+#[tokio::test]
+async fn inline_emoji_picker_esc_keeps_partial() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('i');
+    h.press_char(':');
+    h.press_char('r');
+    h.press_char('o');
+    assert_eq!(h.state.input_text, ":ro");
+    h.press_esc();
+    assert_eq!(h.state.input_mode, InputMode::Insert);
+    assert_eq!(h.state.input_text, ":ro");
+}
+
+#[tokio::test]
+async fn inline_emoji_picker_backspace_empty_removes_colon() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('i');
+    h.press_char('h');
+    h.press_char(':');
+    assert_eq!(h.state.input_text, "h:");
+    h.press_key(KeyCode::Backspace);
+    assert_eq!(h.state.input_mode, InputMode::Insert);
+    assert_eq!(h.state.input_text, "h");
+}
+
+#[tokio::test]
+async fn colon_inside_backticks_does_not_open_picker() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('i');
+    h.press_char('`');
+    h.press_char(':');
+    assert_eq!(h.state.input_mode, InputMode::Insert);
+    assert_eq!(h.state.input_text, "`:");
 }

@@ -50,6 +50,13 @@ pub trait SlackApi: Clone + Send + Sync + 'static {
         page: u32,
         count: u32,
     ) -> impl std::future::Future<Output = Result<SearchMessagesData>> + Send;
+    fn files_upload(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        filename: &str,
+        data: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<FilesCompleteUploadData>> + Send;
 }
 
 #[derive(Clone)]
@@ -298,6 +305,57 @@ impl SlackClient {
         .await
     }
 
+    pub async fn files_get_upload_url(
+        &self,
+        filename: &str,
+        length: usize,
+    ) -> Result<FilesGetUploadURLData> {
+        let length_str = length.to_string();
+        self.post(
+            "files.getUploadURLExternal",
+            &[("filename", filename), ("length", &length_str)],
+        )
+        .await
+    }
+
+    pub async fn files_complete_upload(
+        &self,
+        file_id: &str,
+        channel_id: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<FilesCompleteUploadData> {
+        let files_json = serde_json::json!([{"id": file_id}]).to_string();
+        let mut params: Vec<(&str, &str)> = vec![
+            ("files", &files_json),
+            ("channel_id", channel_id),
+        ];
+        if let Some(ts) = thread_ts {
+            params.push(("thread_ts", ts));
+        }
+        self.post("files.completeUploadExternal", &params).await
+    }
+
+    pub async fn files_upload(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        filename: &str,
+        data: Vec<u8>,
+    ) -> Result<FilesCompleteUploadData> {
+        let url_data = self.files_get_upload_url(filename, data.len()).await?;
+        let resp = self
+            .http
+            .post(&url_data.upload_url)
+            .body(data)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("HTTP {} uploading file", resp.status());
+        }
+        self.files_complete_upload(&url_data.file_id, channel, thread_ts)
+            .await
+    }
+
     /// Download a file from a Slack private URL (uses cookie auth).
     pub async fn download_file_raw(&self, url: &str) -> Result<Vec<u8>> {
         let resp = self.http.get(url).send().await?;
@@ -371,5 +429,15 @@ impl SlackApi for SlackClient {
         count: u32,
     ) -> Result<SearchMessagesData> {
         self.search_messages(query, page, count).await
+    }
+
+    async fn files_upload(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        filename: &str,
+        data: Vec<u8>,
+    ) -> Result<FilesCompleteUploadData> {
+        self.files_upload(channel, thread_ts, filename, data).await
     }
 }

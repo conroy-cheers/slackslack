@@ -120,6 +120,15 @@ impl TestHarness {
         }))
     }
 
+    pub fn press_alt(&mut self, c: char) -> HandleResult {
+        self.send_event(Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }))
+    }
+
     pub fn press_char(&mut self, c: char) -> HandleResult {
         self.press_key(KeyCode::Char(c))
     }
@@ -144,6 +153,24 @@ impl TestHarness {
         for c in text.chars() {
             self.press_char(c);
         }
+    }
+
+    pub fn scroll_up_in(&mut self, area: ratatui::layout::Rect) -> HandleResult {
+        self.send_event(Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: area.x + 1,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    pub fn scroll_down_in(&mut self, area: ratatui::layout::Rect) -> HandleResult {
+        self.send_event(Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: area.x + 1,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }))
     }
 
     // ── Event processing ───────────────────────────────────────────────

@@ -39,6 +39,11 @@ pub enum ApiCall {
     SearchMessages {
         query: String,
     },
+    FilesUpload {
+        channel: String,
+        filename: String,
+        thread_ts: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -226,5 +231,20 @@ impl SlackApi for MockSlackClient {
             query: query.to_string(),
         });
         async { Ok(SearchMessagesData::default()) }
+    }
+
+    fn files_upload(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        filename: &str,
+        _data: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<FilesCompleteUploadData>> + Send {
+        self.record(ApiCall::FilesUpload {
+            channel: channel.to_string(),
+            filename: filename.to_string(),
+            thread_ts: thread_ts.map(|s| s.to_string()),
+        });
+        async { Ok(FilesCompleteUploadData::default()) }
     }
 }

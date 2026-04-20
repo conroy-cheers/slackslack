@@ -93,8 +93,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
             let prefix = format!("#{} @{}: ", channel_name, username);
             let text_budget = width.saturating_sub(prefix.len()).max(1);
-            let text_preview: String = m
-                .text
+            let formatted = super::messages::resolve_slack_markup_pub(&m.text, state);
+            let text_preview: String = formatted
                 .chars()
                 .take(text_budget)
                 .map(|c| if c == '\n' { ' ' } else { c })

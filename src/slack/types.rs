@@ -253,6 +253,24 @@ pub struct ReactionsData {}
 #[derive(Debug, Deserialize, Default)]
 pub struct ConversationsMarkData {}
 
+// === files.getUploadURLExternal ===
+
+#[derive(Debug, Deserialize, Default)]
+pub struct FilesGetUploadURLData {
+    #[serde(default)]
+    pub upload_url: String,
+    #[serde(default)]
+    pub file_id: String,
+}
+
+// === files.completeUploadExternal ===
+
+#[derive(Debug, Deserialize, Default)]
+pub struct FilesCompleteUploadData {
+    #[serde(default)]
+    pub files: Vec<SlackFile>,
+}
+
 // === emoji.list ===
 
 #[derive(Debug, Deserialize, Default)]

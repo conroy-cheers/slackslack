@@ -69,6 +69,7 @@ fn render_inline_emoji(
             p.display_cols,
             p.display_rows,
             &cached.png_data,
+            None,
         )?;
     }
     Ok(())
@@ -87,7 +88,9 @@ fn render_placements(
 
     for placement in placements {
         let line = placement.line;
-        if line < scroll_y || line >= visible_end {
+        let img_end = line + placement.display_rows as usize;
+
+        if img_end <= scroll_y || line >= visible_end {
             continue;
         }
 
@@ -98,31 +101,51 @@ fn render_placements(
             None => continue,
         };
 
-        let offset_in_view = (line - scroll_y) as u16;
+        let top_crop_rows = if line < scroll_y { (scroll_y - line) as u16 } else { 0 };
+        let offset_in_view = if line >= scroll_y { (line - scroll_y) as u16 } else { 0 };
         let screen_row = inner_y + offset_in_view;
         let screen_col = inner_x + placement.col;
 
         let rows_remaining = inner_height.saturating_sub(offset_in_view);
-        let display_rows = placement.display_rows.min(rows_remaining);
+        let visible_rows = (placement.display_rows - top_crop_rows).min(rows_remaining);
 
-        if display_rows == 0 {
+        if visible_rows == 0 {
             continue;
         }
 
-        if is_occluded(screen_row, screen_col, display_rows, placement.display_cols, &state.occlusion_rects) {
+        if is_occluded(screen_row, screen_col, visible_rows, placement.display_cols, &state.occlusion_rects) {
             continue;
         }
+
+        let crop = if top_crop_rows > 0 || visible_rows < placement.display_rows {
+            Some(VerticalCrop {
+                top_crop_rows,
+                visible_rows,
+                total_rows: placement.display_rows,
+                img_height: cached.height,
+            })
+        } else {
+            None
+        };
 
         display_image(
             writer,
             screen_row,
             screen_col,
             placement.display_cols,
-            display_rows,
+            visible_rows,
             &cached.png_data,
+            crop,
         )?;
     }
     Ok(())
+}
+
+struct VerticalCrop {
+    top_crop_rows: u16,
+    visible_rows: u16,
+    total_rows: u16,
+    img_height: u32,
 }
 
 fn is_occluded(row: u16, col: u16, rows: u16, cols: u16, rects: &[Rect]) -> bool {
@@ -139,6 +162,7 @@ fn is_occluded(row: u16, col: u16, rows: u16, cols: u16, rects: &[Rect]) -> bool
 }
 
 /// Display a single image at the given screen position using kitty protocol.
+/// If `crop` is provided, the source image is re-encoded with vertical cropping.
 fn display_image(
     writer: &mut impl Write,
     row: u16,
@@ -146,22 +170,28 @@ fn display_image(
     cols: u16,
     rows: u16,
     png_data: &[u8],
+    crop: Option<VerticalCrop>,
 ) -> std::io::Result<()> {
-    // Move cursor to position (1-indexed)
     write!(writer, "\x1b[{};{}H", row + 1, col + 1)?;
 
-    let b64 = base64::engine::general_purpose::STANDARD.encode(png_data);
+    let cropped;
+    let data: &[u8] = if let Some(crop) = crop {
+        cropped = crop_image_vertical(png_data, &crop);
+        cropped.as_deref().unwrap_or(png_data)
+    } else {
+        png_data
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
     let total_len = b64.len();
 
     if total_len <= CHUNK_SIZE {
-        // Single chunk
         write!(
             writer,
             "\x1b_Ga=T,f=100,t=d,c={},r={},q=2;{}\x1b\\",
             cols, rows, &b64
         )?;
     } else {
-        // Multi-chunk transmission
         let mut offset = 0;
         let mut first = true;
         while offset < total_len {
@@ -184,6 +214,21 @@ fn display_image(
     }
 
     Ok(())
+}
+
+fn crop_image_vertical(png_data: &[u8], crop: &VerticalCrop) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(png_data).ok()?;
+    let h = img.height();
+    let w = img.width();
+    let pixels_per_row = h as f64 / crop.total_rows as f64;
+    let y_start = (crop.top_crop_rows as f64 * pixels_per_row).round() as u32;
+    let y_height = (crop.visible_rows as f64 * pixels_per_row).round() as u32;
+    let y_height = y_height.min(h.saturating_sub(y_start)).max(1);
+    let cropped = img.crop_imm(0, y_start, w, y_height);
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    cropped.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
+    Some(buf)
 }
 
 /// Encode raw image bytes (JPEG, PNG, etc.) into PNG for kitty protocol.

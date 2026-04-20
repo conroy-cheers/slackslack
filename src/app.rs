@@ -1,4 +1,4 @@
-use crate::cache::DiskCache;
+use crate::cache::{DiskCache, load_standard_emoji_cache};
 use crate::event::handler::{HandleResult, handle_event};
 use crate::event::Event;
 use crate::slack::client::SlackClient;
@@ -44,6 +44,11 @@ impl App {
                 info!("Restored {} channel sections from cache", state.channel_sections.len());
             }
             state.dirty = true;
+        }
+
+        if let Some(standard) = load_standard_emoji_cache() {
+            state.standard_emoji = standard;
+            info!("Restored {} standard emoji from cache", state.standard_emoji.len());
         }
 
         Self {
@@ -112,18 +117,31 @@ impl App {
             tokio::select! {
                 Some(event) = self.event_rx.recv() => {
                     let mut should_quit = false;
+                    let mut editor_path = None;
                     let result = handle_event(event, &mut self.state, &self.client, &self.event_tx);
-                    if matches!(result, HandleResult::Quit) { should_quit = true; }
+                    match result {
+                        HandleResult::Quit => should_quit = true,
+                        HandleResult::SuspendForEditor(path) => editor_path = Some(path),
+                        HandleResult::Continue => {}
+                    }
 
                     // Drain any pending events before rendering
-                    if !should_quit {
+                    if !should_quit && editor_path.is_none() {
                         while let Ok(event) = self.event_rx.try_recv() {
                             let result = handle_event(event, &mut self.state, &self.client, &self.event_tx);
-                            if matches!(result, HandleResult::Quit) { should_quit = true; break; }
+                            match result {
+                                HandleResult::Quit => { should_quit = true; break; }
+                                HandleResult::SuspendForEditor(path) => { editor_path = Some(path); break; }
+                                HandleResult::Continue => {}
+                            }
                         }
                     }
 
                     if should_quit { break; }
+
+                    if let Some(path) = editor_path {
+                        Self::run_editor(&mut self.state, &path, &mut terminal)?;
+                    }
 
                     // Render immediately — don't wait for tick
                     Self::render_frame(&mut self.state, &mut terminal)?;
@@ -194,6 +212,41 @@ impl App {
         Ok(())
     }
 
+    fn run_editor(
+        state: &mut AppState,
+        path: &std::path::Path,
+        terminal: &mut ratatui::DefaultTerminal,
+    ) -> Result<()> {
+        use std::process::Command;
+
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+
+        // Suspend TUI
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        ratatui::restore();
+
+        let status = Command::new(&editor).arg(path).status();
+
+        // Re-enter TUI
+        *terminal = ratatui::init();
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+            .expect("Failed to enable mouse capture");
+
+        match status {
+            Ok(s) if s.success() => {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    let text = text.trim_end_matches('\n').to_string();
+                    state.input_text = text;
+                    state.input_cursor = state.input_text.chars().count();
+                }
+            }
+            _ => {}
+        }
+        let _ = std::fs::remove_file(path);
+        state.dirty = true;
+        Ok(())
+    }
+
     fn spawn_initial_loads(&self) {
         // Load channels
         let client = self.client.clone();
@@ -243,6 +296,23 @@ impl App {
             }
         });
 
+        // Load standard emoji from iamcal/emoji-data (skip if cache is fresh)
+        if self.state.standard_emoji.is_empty() {
+            let tx = self.event_tx.clone();
+            tokio::spawn(async move {
+                match fetch_standard_emoji().await {
+                    Ok(emoji_map) => {
+                        info!("Fetched {} standard emoji from emoji-data", emoji_map.len());
+                        crate::cache::save_standard_emoji_cache(&emoji_map);
+                        let _ = tx.send(Event::StandardEmojiLoaded(emoji_map));
+                    }
+                    Err(e) => {
+                        error!("Failed to fetch standard emoji: {}", e);
+                    }
+                }
+            });
+        }
+
         // Load channel sections
         let client = self.client.clone();
         let tx = self.event_tx.clone();
@@ -270,4 +340,37 @@ impl App {
         cache.save(&self.team_id);
         info!("Saved cache");
     }
+}
+
+#[derive(serde::Deserialize)]
+struct EmojiDataEntry {
+    short_names: Vec<String>,
+    unified: String,
+}
+
+fn unified_to_string(unified: &str) -> Option<String> {
+    let mut s = String::new();
+    for hex in unified.split('-') {
+        let cp = u32::from_str_radix(hex, 16).ok()?;
+        s.push(char::from_u32(cp)?);
+    }
+    Some(s)
+}
+
+async fn fetch_standard_emoji() -> Result<std::collections::HashMap<String, String>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://raw.githubusercontent.com/iamcal/emoji-data/master/emoji.json")
+        .send()
+        .await?;
+    let entries: Vec<EmojiDataEntry> = resp.json().await?;
+    let mut map = std::collections::HashMap::new();
+    for entry in &entries {
+        if let Some(unicode) = unified_to_string(&entry.unified) {
+            for name in &entry.short_names {
+                map.insert(name.clone(), unicode.clone());
+            }
+        }
+    }
+    Ok(map)
 }

@@ -136,6 +136,7 @@ pub struct AppState {
     pub scroll_offset: usize,
     pub max_scroll_offset: usize,
     pub selected_message_idx: usize, // 0 = newest, increases going older
+    pub messages_scroll_override: Option<usize>,
 
     // Thread (view pointers — data lives in channel_data.threads)
     pub thread_channel_id: Option<String>,
@@ -160,6 +161,20 @@ pub struct AppState {
     // Reply target (true = thread, false = channel)
     pub reply_to_thread: bool,
 
+    // Input box scroll offset (for when content exceeds visible area)
+    pub input_scroll: u16,
+
+    // Drafts per channel: channel_id -> (text, cursor, reply_to_thread)
+    pub channel_drafts: HashMap<String, (String, usize, bool)>,
+
+    // Kill ring (for Ctrl+y yank)
+    pub kill_ring: VecDeque<String>,
+
+    // File upload
+    pub file_path_input: String,
+    pub file_path_cursor: usize,
+    pub upload_status: Option<String>,
+
     // Reaction
     pub reaction_input: String,
 
@@ -172,6 +187,10 @@ pub struct AppState {
 
     // Help overlay
     pub show_help: bool,
+
+    // Message context menu
+    pub show_context_menu: bool,
+    pub context_menu_selected: usize,
 
     // Clipboard (pending OSC 52 write)
     pub clipboard_pending: Option<String>,
@@ -190,6 +209,7 @@ pub struct AppState {
     pub occlusion_rects: Vec<Rect>,
 
     // Custom emoji
+    pub standard_emoji: HashMap<String, String>, // shortcode -> unicode (from iamcal/emoji-data)
     pub custom_emoji: HashMap<String, String>, // name -> resolved URL or "alias:other"
     pub custom_emoji_images: HashMap<String, CachedImage>,
     pub pending_emoji_images: HashSet<String>,
@@ -210,6 +230,8 @@ pub struct AppState {
     pub emoji_picker_selected: usize,
     pub emoji_picker_results: Vec<(String, String, bool)>, // (name, display, is_custom)
     pub emoji_picker_source: EmojiPickerSource,
+    pub emoji_picker_message_reactions: Vec<(String, bool)>, // (name, user_has_reacted)
+    pub emoji_picker_inline_colon_pos: Option<usize>, // char position of the ':' that triggered inline picker
 
     // User picker
     pub user_picker_query: String,
@@ -219,6 +241,7 @@ pub struct AppState {
     // Channel list visual map (populated during render, read by event handler)
     pub channel_list_items: Vec<ChannelListEntry>,
     pub channel_list_offset: usize,
+    pub selected_visual_idx: usize,
 
     // Channel sort
     pub channels_need_resort: bool,
@@ -310,6 +333,7 @@ pub enum InputMode {
     EmojiPicker,
     UserPicker,
     GlobalSearch,
+    FilePath,      // file path input for upload
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -342,6 +366,7 @@ impl AppState {
             scroll_offset: 0,
             max_scroll_offset: 0,
             selected_message_idx: 0,
+            messages_scroll_override: None,
             thread_channel_id: None,
             thread_parent_ts: None,
             thread_scroll_offset: 0,
@@ -355,6 +380,12 @@ impl AppState {
             input_history_idx: None,
             input_stash: String::new(),
             reply_to_thread: false,
+            input_scroll: 0,
+            channel_drafts: HashMap::new(),
+            kill_ring: VecDeque::new(),
+            file_path_input: String::new(),
+            file_path_cursor: 0,
+            upload_status: None,
             reaction_input: String::new(),
             message_search_query: String::new(),
             message_search_active: false,
@@ -362,6 +393,8 @@ impl AppState {
             message_search_results_set: HashSet::new(),
             message_search_idx: 0,
             show_help: false,
+            show_context_menu: false,
+            context_menu_selected: 0,
             clipboard_pending: None,
             message_line_starts: Vec::new(),
             image_cache: HashMap::new(),
@@ -372,6 +405,7 @@ impl AppState {
             thread_render_info: None,
             inline_emoji_placements: Vec::new(),
             occlusion_rects: Vec::new(),
+            standard_emoji: HashMap::new(),
             custom_emoji: HashMap::new(),
             custom_emoji_images: HashMap::new(),
             pending_emoji_images: HashSet::new(),
@@ -386,11 +420,14 @@ impl AppState {
             emoji_picker_selected: 0,
             emoji_picker_results: Vec::new(),
             emoji_picker_source: EmojiPickerSource::Reaction,
+            emoji_picker_message_reactions: Vec::new(),
+            emoji_picker_inline_colon_pos: None,
             user_picker_query: String::new(),
             user_picker_selected: 0,
             user_picker_results: Vec::new(),
             channel_list_items: Vec::new(),
             channel_list_offset: 0,
+            selected_visual_idx: 0,
             channels_need_resort: false,
             global_search_query: String::new(),
             global_search_results: Vec::new(),
@@ -559,29 +596,151 @@ impl AppState {
     }
 
     pub fn channel_next(&mut self) {
-        let visible = self.visible_channel_indices();
-        if visible.is_empty() {
+        if self.channel_list_items.is_empty() {
+            // Fallback: pre-render, navigate by channel index directly
+            if !self.channels.is_empty() {
+                self.selected_channel_idx = (self.selected_channel_idx + 1) % self.channels.len();
+            }
             return;
         }
-        if let Some(pos) = visible.iter().position(|&i| i == self.selected_channel_idx) {
-            let next = (pos + 1) % visible.len();
-            self.selected_channel_idx = visible[next];
-        } else {
-            self.selected_channel_idx = visible[0];
+        let len = self.channel_list_items.len();
+        let mut next = (self.selected_visual_idx + 1) % len;
+        let start = next;
+        loop {
+            if !matches!(self.channel_list_items[next], ChannelListEntry::Spacer) {
+                break;
+            }
+            next = (next + 1) % len;
+            if next == start {
+                return;
+            }
         }
+        self.selected_visual_idx = next;
+        self.sync_selected_channel_from_visual();
     }
 
     pub fn channel_prev(&mut self) {
-        let visible = self.visible_channel_indices();
-        if visible.is_empty() {
+        if self.channel_list_items.is_empty() {
+            if !self.channels.is_empty() {
+                let len = self.channels.len();
+                self.selected_channel_idx = if self.selected_channel_idx == 0 { len - 1 } else { self.selected_channel_idx - 1 };
+            }
             return;
         }
-        if let Some(pos) = visible.iter().position(|&i| i == self.selected_channel_idx) {
-            let prev = if pos == 0 { visible.len() - 1 } else { pos - 1 };
-            self.selected_channel_idx = visible[prev];
-        } else {
-            self.selected_channel_idx = *visible.last().unwrap();
+        let len = self.channel_list_items.len();
+        let mut prev = if self.selected_visual_idx == 0 { len - 1 } else { self.selected_visual_idx - 1 };
+        let start = prev;
+        loop {
+            if !matches!(self.channel_list_items[prev], ChannelListEntry::Spacer) {
+                break;
+            }
+            prev = if prev == 0 { len - 1 } else { prev - 1 };
+            if prev == start {
+                return;
+            }
         }
+        self.selected_visual_idx = prev;
+        self.sync_selected_channel_from_visual();
+    }
+
+    pub fn channel_next_no_wrap(&mut self) {
+        if self.channel_list_items.is_empty() {
+            if !self.channels.is_empty() && self.selected_channel_idx + 1 < self.channels.len() {
+                self.selected_channel_idx += 1;
+            }
+            return;
+        }
+        let len = self.channel_list_items.len();
+        let mut next = self.selected_visual_idx + 1;
+        while next < len {
+            if !matches!(self.channel_list_items[next], ChannelListEntry::Spacer) {
+                self.selected_visual_idx = next;
+                self.sync_selected_channel_from_visual();
+                return;
+            }
+            next += 1;
+        }
+    }
+
+    pub fn channel_prev_no_wrap(&mut self) {
+        if self.channel_list_items.is_empty() {
+            if !self.channels.is_empty() && self.selected_channel_idx > 0 {
+                self.selected_channel_idx -= 1;
+            }
+            return;
+        }
+        if self.selected_visual_idx == 0 {
+            return;
+        }
+        let mut prev = self.selected_visual_idx - 1;
+        loop {
+            if !matches!(self.channel_list_items[prev], ChannelListEntry::Spacer) {
+                self.selected_visual_idx = prev;
+                self.sync_selected_channel_from_visual();
+                return;
+            }
+            if prev == 0 {
+                return;
+            }
+            prev -= 1;
+        }
+    }
+
+    pub fn sync_selected_channel_from_visual(&mut self) {
+        if let Some(ChannelListEntry::Channel(idx)) = self.channel_list_items.get(self.selected_visual_idx) {
+            self.selected_channel_idx = *idx;
+        }
+    }
+
+    pub fn channel_next_channel(&mut self) {
+        if self.channel_list_items.is_empty() {
+            if !self.channels.is_empty() {
+                self.selected_channel_idx = (self.selected_channel_idx + 1) % self.channels.len();
+            }
+            return;
+        }
+        let len = self.channel_list_items.len();
+        let mut next = (self.selected_visual_idx + 1) % len;
+        let start = next;
+        loop {
+            if matches!(self.channel_list_items[next], ChannelListEntry::Channel(_)) {
+                break;
+            }
+            next = (next + 1) % len;
+            if next == start {
+                return;
+            }
+        }
+        self.selected_visual_idx = next;
+        self.sync_selected_channel_from_visual();
+    }
+
+    pub fn channel_prev_channel(&mut self) {
+        if self.channel_list_items.is_empty() {
+            if !self.channels.is_empty() {
+                let len = self.channels.len();
+                self.selected_channel_idx = if self.selected_channel_idx == 0 { len - 1 } else { self.selected_channel_idx - 1 };
+            }
+            return;
+        }
+        let len = self.channel_list_items.len();
+        let mut prev = if self.selected_visual_idx == 0 { len - 1 } else { self.selected_visual_idx - 1 };
+        let start = prev;
+        loop {
+            if matches!(self.channel_list_items[prev], ChannelListEntry::Channel(_)) {
+                break;
+            }
+            prev = if prev == 0 { len - 1 } else { prev - 1 };
+            if prev == start {
+                return;
+            }
+        }
+        self.selected_visual_idx = prev;
+        self.sync_selected_channel_from_visual();
+    }
+
+    pub fn selected_visual_entry(&self) -> Option<&ChannelListEntry> {
+        self.channel_list_items.get(self.selected_visual_idx)
     }
 
     pub fn visible_channel_indices(&self) -> Vec<usize> {
@@ -636,10 +795,12 @@ impl AppState {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.selected_message_idx = 0;
+        self.messages_scroll_override = None;
     }
 
     pub fn scroll_to_top(&mut self) {
         self.scroll_offset = self.max_scroll_offset;
+        self.messages_scroll_override = None;
     }
 
     pub fn scroll_half_page_down(&mut self, page_height: usize) {
@@ -665,6 +826,7 @@ impl AppState {
     pub fn message_select_newer(&mut self) -> bool {
         let old = self.selected_message_idx;
         self.selected_message_idx = self.selected_message_idx.saturating_sub(1);
+        self.messages_scroll_override = None;
         self.selected_message_idx != old
     }
 
@@ -672,6 +834,7 @@ impl AppState {
         let old = self.selected_message_idx;
         let max = self.message_count().saturating_sub(1);
         self.selected_message_idx = (self.selected_message_idx + 1).min(max);
+        self.messages_scroll_override = None;
         self.selected_message_idx != old
     }
 
@@ -827,11 +990,60 @@ impl AppState {
         })
     }
 
+    pub fn push_kill_ring(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.kill_ring.push_back(text);
+        if self.kill_ring.len() > 16 {
+            self.kill_ring.pop_front();
+        }
+    }
+
+    pub fn save_current_draft(&mut self) {
+        if let Some(channel_id) = self.active_channel_id() {
+            if self.input_text.is_empty() {
+                self.channel_drafts.remove(&channel_id);
+            } else {
+                self.channel_drafts.insert(
+                    channel_id,
+                    (self.input_text.clone(), self.input_cursor, self.reply_to_thread),
+                );
+            }
+        }
+    }
+
+    pub fn restore_draft_for_current(&mut self) {
+        if let Some(channel_id) = self.active_channel_id() {
+            if let Some((text, cursor, reply)) = self.channel_drafts.get(&channel_id).cloned() {
+                self.input_text = text;
+                self.input_cursor = cursor;
+                self.reply_to_thread = reply;
+            } else {
+                self.input_text.clear();
+                self.input_cursor = 0;
+                self.reply_to_thread = false;
+            }
+            self.input_scroll = 0;
+        }
+    }
+
+    pub fn input_cursor_byte_offset(&self) -> usize {
+        self.input_text
+            .char_indices()
+            .nth(self.input_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input_text.len())
+    }
+
+    pub fn input_char_count(&self) -> usize {
+        self.input_text.chars().count()
+    }
+
     /// Save current input to history and clear.
     pub fn save_input_to_history(&mut self) {
         let text = self.input_text.trim().to_string();
         if !text.is_empty() {
-            // Don't add duplicates of the last entry
             if self.input_history.last() != Some(&text) {
                 self.input_history.push(text);
             }
@@ -840,6 +1052,10 @@ impl AppState {
         self.input_cursor = 0;
         self.input_history_idx = None;
         self.input_stash.clear();
+        // Clear draft for this channel since message was sent
+        if let Some(channel_id) = self.active_channel_id() {
+            self.channel_drafts.remove(&channel_id);
+        }
     }
 
     /// Navigate to previous input history entry.
@@ -854,13 +1070,13 @@ impl AppState {
                 let idx = self.input_history.len() - 1;
                 self.input_history_idx = Some(idx);
                 self.input_text = self.input_history[idx].clone();
-                self.input_cursor = self.input_text.len();
+                self.input_cursor = self.input_char_count();
             }
             Some(idx) if idx > 0 => {
                 let new_idx = idx - 1;
                 self.input_history_idx = Some(new_idx);
                 self.input_text = self.input_history[new_idx].clone();
-                self.input_cursor = self.input_text.len();
+                self.input_cursor = self.input_char_count();
             }
             _ => {}
         }
@@ -874,12 +1090,12 @@ impl AppState {
                     let new_idx = idx + 1;
                     self.input_history_idx = Some(new_idx);
                     self.input_text = self.input_history[new_idx].clone();
-                    self.input_cursor = self.input_text.len();
+                    self.input_cursor = self.input_char_count();
                 } else {
                     // Restore stashed input
                     self.input_history_idx = None;
                     self.input_text = self.input_stash.clone();
-                    self.input_cursor = self.input_text.len();
+                    self.input_cursor = self.input_char_count();
                     self.input_stash.clear();
                 }
             }
@@ -990,6 +1206,7 @@ impl AppState {
             let idx = (self.selected_channel_idx + offset) % len;
             if self.channels[idx].unread_count_display > 0 {
                 self.selected_channel_idx = idx;
+                self.sync_visual_from_selected_channel();
                 return true;
             }
         }
@@ -1006,20 +1223,45 @@ impl AppState {
             let idx = (self.selected_channel_idx + len - offset) % len;
             if self.channels[idx].unread_count_display > 0 {
                 self.selected_channel_idx = idx;
+                self.sync_visual_from_selected_channel();
                 return true;
             }
         }
         false
     }
 
-    /// Open the emoji picker from the given source.
-    pub fn open_emoji_picker(&mut self, source: EmojiPickerSource) {
+    pub fn sync_visual_from_selected_channel(&mut self) {
+        if let Some(pos) = self.channel_list_items.iter().position(
+            |entry| matches!(entry, ChannelListEntry::Channel(idx) if *idx == self.selected_channel_idx),
+        ) {
+            self.selected_visual_idx = pos;
+        }
+    }
+
+    /// Open the emoji picker from the given source with optional message reaction context.
+    pub fn open_emoji_picker(&mut self, source: EmojiPickerSource, message_reactions: Vec<(String, bool)>) {
         self.input_mode = InputMode::EmojiPicker;
         self.emoji_picker_source = source;
+        self.emoji_picker_message_reactions = message_reactions;
+        self.emoji_picker_inline_colon_pos = None;
         self.emoji_picker_query.clear();
         self.emoji_picker_selected = 0;
         self.filter_emoji_picker();
         self.dirty = true;
+    }
+
+    pub fn selected_message_reactions(&self) -> Vec<(String, bool)> {
+        let msg = if self.focus == Focus::Thread {
+            self.thread_messages().and_then(|msgs| msgs.first())
+        } else {
+            self.selected_message()
+        };
+        match msg {
+            Some(m) => m.reactions.iter().map(|r| {
+                (r.name.clone(), r.users.contains(&self.self_user_id))
+            }).collect(),
+            None => vec![],
+        }
     }
 
     pub fn avatar_url(&self, user_id: &str) -> Option<&str> {
@@ -1080,10 +1322,18 @@ impl AppState {
         let query = self.emoji_picker_query.to_lowercase();
         let mut results: Vec<(String, String, bool)> = Vec::new();
 
-        // Standard emoji
-        for &(name, display) in crate::ui::emoji::all_standard_emoji() {
-            if query.is_empty() || name.contains(&query) {
-                results.push((name.to_string(), display.to_string(), false));
+        // Standard emoji (runtime map preferred, hardcoded fallback)
+        if self.standard_emoji.is_empty() {
+            for &(name, display) in crate::ui::emoji::all_standard_emoji() {
+                if query.is_empty() || name.contains(&query) {
+                    results.push((name.to_string(), display.to_string(), false));
+                }
+            }
+        } else {
+            for (name, display) in &self.standard_emoji {
+                if query.is_empty() || name.contains(&query) {
+                    results.push((name.clone(), display.clone(), false));
+                }
             }
         }
 
@@ -1101,6 +1351,22 @@ impl AppState {
                 let b_prefix = b.0.starts_with(&query);
                 b_prefix.cmp(&a_prefix).then(a.0.cmp(&b.0))
             });
+        }
+
+        // In Reaction mode: move message reactions to top of results
+        if matches!(self.emoji_picker_source, EmojiPickerSource::Reaction)
+            && !self.emoji_picker_message_reactions.is_empty()
+        {
+            let reaction_names: Vec<&str> = self.emoji_picker_message_reactions
+                .iter().map(|(n, _)| n.as_str()).collect();
+            let (mut msg_reactions, rest): (Vec<_>, Vec<_>) = results
+                .into_iter()
+                .partition(|(name, _, _)| reaction_names.contains(&name.as_str()));
+            msg_reactions.sort_by_key(|(name, _, _)| {
+                reaction_names.iter().position(|n| n == name).unwrap_or(usize::MAX)
+            });
+            results = msg_reactions;
+            results.extend(rest);
         }
 
         self.emoji_picker_results = results;
@@ -1189,11 +1455,12 @@ impl AppState {
         false
     }
 
-    /// Group channels into sections. Returns (section_name, section_id, channel_indices).
+    /// Group channels into sections.
+    /// Returns (section_name, section_id, channel_indices, emoji_shortcode).
     /// Channels not in any user-defined section go into "Channels".
     /// DMs always go into "Direct Messages" at the end.
-    pub fn channels_by_section(&self) -> Vec<(String, Option<String>, Vec<usize>)> {
-        let mut result: Vec<(String, Option<String>, Vec<usize>)> = Vec::new();
+    pub fn channels_by_section(&self) -> Vec<(String, Option<String>, Vec<usize>, Option<String>)> {
+        let mut result: Vec<(String, Option<String>, Vec<usize>, Option<String>)> = Vec::new();
 
         // Build a lookup: channel_id -> section index (for user-defined sections)
         let mut ch_to_section: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -1204,13 +1471,24 @@ impl AppState {
 
         for section in &sorted_sections {
             let section_idx = result.len();
-            let emoji_prefix = if section.emoji.is_empty() {
-                String::new()
+            let emoji_name = if section.emoji.is_empty() {
+                None
             } else {
-                format!("{} ", section.emoji)
+                Some(section.emoji.clone())
+            };
+            let emoji_prefix = match &emoji_name {
+                Some(name) => {
+                    if let Some(unicode) = crate::ui::emoji::emoji_for_runtime(name, &self.standard_emoji) {
+                        format!("{} ", unicode)
+                    } else {
+                        // Custom emoji — render a placeholder, the image will be placed by channels.rs
+                        "   ".to_string()
+                    }
+                }
+                None => String::new(),
             };
             let name = format!("{}{}", emoji_prefix, section.name);
-            result.push((name, Some(section.channel_section_id.clone()), Vec::new()));
+            result.push((name, Some(section.channel_section_id.clone()), Vec::new(), emoji_name));
             for ch_id in &section.channel_ids_page.channel_ids {
                 ch_to_section.insert(ch_id.as_str(), section_idx);
             }
@@ -1231,20 +1509,17 @@ impl AppState {
             }
         }
 
-        // Insert default channels at beginning if any exist and there are no user sections,
-        // or add them as their own section
         if !default_channels.is_empty() {
-            // Insert at the beginning
-            result.insert(0, ("Channels".to_string(), None, default_channels));
+            result.push(("Channels".to_string(), None, default_channels, None));
         }
 
         // DMs at the end
         if !dm_channels.is_empty() {
-            result.push(("Direct Messages".to_string(), None, dm_channels));
+            result.push(("Direct Messages".to_string(), None, dm_channels, None));
         }
 
         // Remove empty sections
-        result.retain(|(_name, _id, channels)| !channels.is_empty());
+        result.retain(|(_name, _id, channels, _emoji)| !channels.is_empty());
 
         result
     }
@@ -1267,7 +1542,27 @@ impl AppState {
             self.selected_message_idx =
                 (self.selected_message_idx + (-delta) as usize).min(max);
         }
+        self.messages_scroll_override = None;
         self.selected_message_idx != old
+    }
+
+    /// Scroll messages view by lines without changing selection.
+    /// Positive delta = increase scroll_y (toward newer/bottom).
+    /// Negative delta = decrease scroll_y (toward older/top).
+    pub fn messages_scroll_lines(&mut self, delta: isize) -> bool {
+        let current = self.messages_scroll_override
+            .or(self.messages_render_info.as_ref().map(|r| r.scroll_y))
+            .unwrap_or(0);
+        let new = if delta > 0 {
+            current.saturating_add(delta as usize).min(self.max_scroll_offset)
+        } else {
+            current.saturating_sub((-delta) as usize)
+        };
+        if new == current {
+            return false;
+        }
+        self.messages_scroll_override = Some(new);
+        true
     }
 }
 
@@ -1350,16 +1645,15 @@ mod tests {
         ];
 
         let sections = state.channels_by_section();
-        // Should have: default Channels (C2), Important (C1), Work (C3), Direct Messages (D1)
+        // Should have: Important (C1), Work (C3), Channels (C2), Direct Messages (D1)
         assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].0, "Important");
+        assert_eq!(sections[1].0, "Work");
+        assert_eq!(sections[2].0, "Channels");
+        assert_eq!(sections[3].0, "Direct Messages");
 
         // Default channels section contains C2 (not in any user section)
-        let default = sections.iter().find(|(name, _, _)| name == "Channels").unwrap();
-        assert_eq!(default.2.len(), 1); // only C2
-
-        // Important section
-        let important = sections.iter().find(|(name, _, _)| name == "Important").unwrap();
-        assert_eq!(important.2.len(), 1);
+        assert_eq!(sections[2].2.len(), 1); // only C2
     }
 
     #[test]

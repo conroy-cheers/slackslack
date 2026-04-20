@@ -1,7 +1,7 @@
 use crate::event::Event;
 use crate::slack::client::SlackApi;
 use crate::slack::types::{WsEvent, WsMessage};
-use crate::state::{AppState, Focus, InputMode};
+use crate::state::{AppState, ChannelListEntry, Focus, InputMode};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 use tracing::error;
@@ -81,6 +81,14 @@ pub fn handle_event<C: SlackApi>(
             HandleResult::Continue
         }
         Event::MessageSent { .. } => HandleResult::Continue,
+        Event::FileUploaded { filename, .. } => {
+            state.upload_status = Some(format!("Uploaded {}", filename));
+            state.input_mode = InputMode::Insert;
+            state.file_path_input.clear();
+            state.file_path_cursor = 0;
+            state.dirty = true;
+            HandleResult::Continue
+        }
         Event::ChannelMarked { channel_id } => {
             let _ = channel_id;
             HandleResult::Continue
@@ -96,6 +104,11 @@ pub fn handle_event<C: SlackApi>(
         }
         Event::CustomEmojiLoaded(emoji_map) => {
             state.custom_emoji = emoji_map;
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::StandardEmojiLoaded(emoji_map) => {
+            state.standard_emoji = emoji_map;
             state.dirty = true;
             HandleResult::Continue
         }
@@ -202,6 +215,11 @@ fn handle_key<C: SlackApi>(
         return HandleResult::Continue;
     }
 
+    // Context menu
+    if state.show_context_menu {
+        return handle_context_menu_key(key, state, client, event_tx);
+    }
+
     match state.input_mode {
         InputMode::Normal => handle_normal_key(key, state, client, event_tx),
         InputMode::Insert => handle_insert_key(key, state, client, event_tx),
@@ -211,6 +229,7 @@ fn handle_key<C: SlackApi>(
         InputMode::EmojiPicker => handle_emoji_picker_key(key, state, client, event_tx),
         InputMode::UserPicker => handle_user_picker_key(key, state),
         InputMode::GlobalSearch => handle_global_search_key(key, state, client, event_tx),
+        InputMode::FilePath => handle_file_path_key(key, state, client, event_tx),
     }
 }
 
@@ -261,35 +280,36 @@ fn handle_normal_channels<C: SlackApi>(
         KeyCode::Char('j') | KeyCode::Down => state.channel_next(),
         KeyCode::Char('k') | KeyCode::Up => state.channel_prev(),
         KeyCode::Char('G') | KeyCode::End => {
-            let visible = state.visible_channel_indices();
-            if let Some(&last) = visible.last() {
-                state.selected_channel_idx = last;
+            if !state.channel_list_items.is_empty() {
+                let last = state.channel_list_items.len() - 1;
+                state.selected_visual_idx = last;
+                state.sync_selected_channel_from_visual();
             }
         }
         KeyCode::Char('g') | KeyCode::Home => {
-            let visible = state.visible_channel_indices();
-            if let Some(&first) = visible.first() {
-                state.selected_channel_idx = first;
-            }
+            state.selected_visual_idx = 0;
+            state.sync_selected_channel_from_visual();
         }
         KeyCode::PageDown => {
-            let visible = state.visible_channel_indices();
-            if let Some(pos) = visible.iter().position(|&i| i == state.selected_channel_idx) {
-                let target = (pos + 15).min(visible.len().saturating_sub(1));
-                state.selected_channel_idx = visible[target];
+            let len = state.channel_list_items.len();
+            if len > 0 {
+                state.selected_visual_idx = (state.selected_visual_idx + 15).min(len - 1);
+                if matches!(state.channel_list_items.get(state.selected_visual_idx), Some(ChannelListEntry::Spacer)) {
+                    state.selected_visual_idx = (state.selected_visual_idx + 1).min(len - 1);
+                }
+                state.sync_selected_channel_from_visual();
             }
         }
         KeyCode::PageUp => {
-            let visible = state.visible_channel_indices();
-            if let Some(pos) = visible.iter().position(|&i| i == state.selected_channel_idx) {
-                let target = pos.saturating_sub(15);
-                state.selected_channel_idx = visible[target];
+            state.selected_visual_idx = state.selected_visual_idx.saturating_sub(15);
+            if matches!(state.channel_list_items.get(state.selected_visual_idx), Some(ChannelListEntry::Spacer)) {
+                state.selected_visual_idx = state.selected_visual_idx.saturating_sub(1);
             }
+            state.sync_selected_channel_from_visual();
         }
         // Open channel / toggle section
         KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-            // Check if the currently selected visual item is a section header or DmMore
-            let visual_entry = find_selected_visual_entry(state);
+            let visual_entry = state.selected_visual_entry().cloned();
             match visual_entry {
                 Some(crate::state::ChannelListEntry::SectionHeader(ref id))
                     if id != "__channels__" && id != "__dm__" =>
@@ -301,8 +321,10 @@ fn handle_normal_channels<C: SlackApi>(
                     state.dirty = true;
                 }
                 _ => {
+                    state.save_current_draft();
                     state.focus = Focus::Messages;
                     state.selected_message_idx = 0;
+                    state.restore_draft_for_current();
                     ensure_history_loaded(state, client, event_tx);
                 }
             }
@@ -335,16 +357,6 @@ fn handle_normal_channels<C: SlackApi>(
         _ => {}
     }
     HandleResult::Continue
-}
-
-/// Find the visual channel list entry corresponding to the currently selected channel.
-fn find_selected_visual_entry(state: &AppState) -> Option<crate::state::ChannelListEntry> {
-    // Find the visual item that corresponds to the selected channel
-    state
-        .channel_list_items
-        .iter()
-        .find(|entry| matches!(entry, crate::state::ChannelListEntry::Channel(idx) if *idx == state.selected_channel_idx))
-        .cloned()
 }
 
 fn handle_normal_messages<C: SlackApi>(
@@ -435,7 +447,8 @@ fn handle_normal_messages<C: SlackApi>(
         // Reaction via emoji picker
         KeyCode::Char('r') => {
             if state.selected_message().is_some() {
-                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction);
+                let reactions = state.selected_message_reactions();
+                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction, reactions);
             }
         }
         // Message search
@@ -470,29 +483,27 @@ fn handle_normal_messages<C: SlackApi>(
         // Channel navigation from messages view
         KeyCode::Char(']') => {
             state.close_thread();
-            state.channel_next();
-            state.selected_message_idx = 0;
-            state.clear_message_search();
-            ensure_history_loaded(state, client, event_tx);
+            switch_channel(state, client, event_tx, |s| s.channel_next_channel());
         }
         KeyCode::Char('[') => {
             state.close_thread();
-            state.channel_prev();
-            state.selected_message_idx = 0;
-            state.clear_message_search();
-            ensure_history_loaded(state, client, event_tx);
+            switch_channel(state, client, event_tx, |s| s.channel_prev_channel());
         }
         KeyCode::Char('}') => {
+            state.save_current_draft();
             if state.next_unread_channel() {
                 state.close_thread();
+                state.restore_draft_for_current();
                 state.selected_message_idx = 0;
                 state.clear_message_search();
                 ensure_history_loaded(state, client, event_tx);
             }
         }
         KeyCode::Char('{') => {
+            state.save_current_draft();
             if state.prev_unread_channel() {
                 state.close_thread();
+                state.restore_draft_for_current();
                 state.selected_message_idx = 0;
                 state.clear_message_search();
                 ensure_history_loaded(state, client, event_tx);
@@ -503,6 +514,13 @@ fn handle_normal_messages<C: SlackApi>(
             if let Some(msg) = state.selected_message() {
                 let text = msg.text.clone();
                 state.clipboard_pending = Some(text);
+            }
+        }
+        // Context menu
+        KeyCode::Char(' ') => {
+            if state.selected_message().is_some() {
+                state.show_context_menu = true;
+                state.context_menu_selected = 0;
             }
         }
         _ => {}
@@ -582,10 +600,11 @@ fn handle_normal_thread<C: SlackApi>(
             state.focus = Focus::Input;
             state.input_mode = InputMode::Insert;
         }
-        // Reaction via emoji picker (on thread parent for now)
+        // Reaction via emoji picker (on thread parent)
         KeyCode::Char('r') => {
             if state.thread_parent_ts.is_some() && state.thread_channel_id.is_some() {
-                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction);
+                let reactions = state.selected_message_reactions();
+                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction, reactions);
             }
         }
         // Cycle focus
@@ -598,15 +617,11 @@ fn handle_normal_thread<C: SlackApi>(
         // Channel navigation from thread
         KeyCode::Char(']') => {
             state.close_thread();
-            state.channel_next();
-            state.selected_message_idx = 0;
-            ensure_history_loaded(state, client, event_tx);
+            switch_channel(state, client, event_tx, |s| s.channel_next());
         }
         KeyCode::Char('[') => {
             state.close_thread();
-            state.channel_prev();
-            state.selected_message_idx = 0;
-            ensure_history_loaded(state, client, event_tx);
+            switch_channel(state, client, event_tx, |s| s.channel_prev());
         }
         _ => {}
     }
@@ -623,28 +638,59 @@ fn handle_insert_key<C: SlackApi>(
 ) -> HandleResult {
     state.dirty = true;
 
+    // Alt modifiers for word-level navigation
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::Char('f') => word_forward(state),
+            KeyCode::Char('b') => word_backward(state),
+            KeyCode::Char('d') => delete_word_forward(state),
+            KeyCode::Char('x') => {
+                return open_external_editor(state);
+            }
+            _ => {}
+        }
+        return HandleResult::Continue;
+    }
+
     // Ctrl modifiers for input editing
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('w') => delete_word_backward(state),
             KeyCode::Char('u') => {
-                state.input_text.drain(..state.input_cursor);
+                let byte_pos = state.input_cursor_byte_offset();
+                let killed: String = state.input_text.drain(..byte_pos).collect();
+                state.push_kill_ring(killed);
                 state.input_cursor = 0;
             }
             KeyCode::Char('k') => {
-                state.input_text.truncate(state.input_cursor);
+                let byte_pos = state.input_cursor_byte_offset();
+                let killed = state.input_text[byte_pos..].to_string();
+                state.input_text.truncate(byte_pos);
+                state.push_kill_ring(killed);
+            }
+            KeyCode::Char('y') => {
+                if let Some(text) = state.kill_ring.back().cloned() {
+                    let byte_pos = state.input_cursor_byte_offset();
+                    state.input_text.insert_str(byte_pos, &text);
+                    state.input_cursor += text.chars().count();
+                }
             }
             KeyCode::Char('a') => {
                 state.input_cursor = 0;
             }
             KeyCode::Char('e') => {
-                // Ctrl+e: if there's no text or cursor is at end, open emoji picker
-                // Otherwise jump to end of line (standard behavior)
-                if state.input_cursor == state.input_text.len() {
-                    state.open_emoji_picker(crate::state::EmojiPickerSource::Insert);
+                if state.input_cursor == state.input_char_count() {
+                    state.open_emoji_picker(crate::state::EmojiPickerSource::Insert, vec![]);
                     return HandleResult::Continue;
                 }
-                state.input_cursor = state.input_text.len();
+                state.input_cursor = state.input_char_count();
+            }
+            KeyCode::Char('o') => {
+                state.input_mode = InputMode::FilePath;
+                state.file_path_input.clear();
+                state.file_path_cursor = 0;
+                state.upload_status = None;
+                return HandleResult::Continue;
             }
             KeyCode::Char('p') => {
                 state.input_history_prev();
@@ -665,6 +711,11 @@ fn handle_insert_key<C: SlackApi>(
             } else {
                 state.focus = Focus::Messages;
             }
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            let byte_pos = state.input_cursor_byte_offset();
+            state.input_text.insert(byte_pos, '\n');
+            state.input_cursor += 1;
         }
         KeyCode::Enter => {
             let text = state.input_text.trim().to_string();
@@ -690,12 +741,16 @@ fn handle_insert_key<C: SlackApi>(
         KeyCode::Backspace => {
             if state.input_cursor > 0 {
                 state.input_cursor -= 1;
-                state.input_text.remove(state.input_cursor);
+                let byte_pos = state.input_cursor_byte_offset();
+                let ch = state.input_text[byte_pos..].chars().next().unwrap();
+                state.input_text.drain(byte_pos..byte_pos + ch.len_utf8());
             }
         }
         KeyCode::Delete => {
-            if state.input_cursor < state.input_text.len() {
-                state.input_text.remove(state.input_cursor);
+            if state.input_cursor < state.input_char_count() {
+                let byte_pos = state.input_cursor_byte_offset();
+                let ch = state.input_text[byte_pos..].chars().next().unwrap();
+                state.input_text.drain(byte_pos..byte_pos + ch.len_utf8());
             }
         }
         KeyCode::Left => {
@@ -704,25 +759,47 @@ fn handle_insert_key<C: SlackApi>(
             }
         }
         KeyCode::Right => {
-            if state.input_cursor < state.input_text.len() {
+            if state.input_cursor < state.input_char_count() {
                 state.input_cursor += 1;
             }
         }
         KeyCode::Up => state.input_history_prev(),
         KeyCode::Down => state.input_history_next(),
         KeyCode::Home => state.input_cursor = 0,
-        KeyCode::End => state.input_cursor = state.input_text.len(),
+        KeyCode::End => state.input_cursor = state.input_char_count(),
+        KeyCode::Tab => {
+            if state.thread_channel_id.is_some() {
+                state.reply_to_thread = !state.reply_to_thread;
+            }
+        }
         KeyCode::Char('@') => {
             state.open_user_picker();
             return HandleResult::Continue;
         }
+        KeyCode::Char(':') => {
+            let byte_pos = state.input_cursor_byte_offset();
+            state.input_text.insert(byte_pos, ':');
+            state.input_cursor += 1;
+            if !cursor_in_code_span(&state.input_text, state.input_cursor) {
+                let colon_pos = state.input_cursor - 1;
+                state.open_emoji_picker(crate::state::EmojiPickerSource::Insert, vec![]);
+                state.emoji_picker_inline_colon_pos = Some(colon_pos);
+            }
+        }
         KeyCode::Char(c) => {
-            state.input_text.insert(state.input_cursor, c);
+            let byte_pos = state.input_cursor_byte_offset();
+            state.input_text.insert(byte_pos, c);
             state.input_cursor += 1;
         }
         _ => {}
     }
     HandleResult::Continue
+}
+
+fn cursor_in_code_span(text: &str, char_cursor: usize) -> bool {
+    let chars: Vec<char> = text.chars().take(char_cursor).collect();
+    let backtick_count = chars.iter().filter(|&&c| c == '`').count();
+    backtick_count % 2 != 0
 }
 
 // ── Channel search mode ─────────────────────────────────────────────────────
@@ -741,11 +818,13 @@ fn handle_search_key<C: SlackApi>(
             state.channel_filter_active = false;
         }
         KeyCode::Enter => {
+            state.save_current_draft();
             state.input_mode = InputMode::Normal;
             state.channel_filter.clear();
             state.channel_filter_active = false;
             state.focus = Focus::Messages;
             state.selected_message_idx = 0;
+            state.restore_draft_for_current();
             ensure_history_loaded(state, client, event_tx);
         }
         KeyCode::Backspace => {
@@ -870,9 +949,16 @@ fn handle_emoji_picker_key<C: SlackApi>(
     event_tx: &mpsc::UnboundedSender<Event>,
 ) -> HandleResult {
     state.dirty = true;
+    let inline = state.emoji_picker_inline_colon_pos;
     match key.code {
         KeyCode::Esc => {
-            state.input_mode = InputMode::Normal;
+            if inline.is_some() {
+                state.emoji_picker_inline_colon_pos = None;
+                state.input_mode = InputMode::Insert;
+                state.focus = Focus::Input;
+            } else {
+                state.input_mode = InputMode::Normal;
+            }
         }
         KeyCode::Enter => {
             if let Some((name, _display, _is_custom)) = state
@@ -882,46 +968,117 @@ fn handle_emoji_picker_key<C: SlackApi>(
             {
                 match state.emoji_picker_source {
                     crate::state::EmojiPickerSource::Reaction => {
-                        // Add reaction to selected message
+                        let should_remove = state.emoji_picker_message_reactions
+                            .iter()
+                            .any(|(n, user_reacted)| n == &name && *user_reacted);
                         if state.focus == Focus::Thread {
                             if let (Some(channel_id), Some(ts)) = (
                                 state.thread_parent_ts.clone().and_then(|_| state.thread_channel_id.clone()),
                                 state.thread_parent_ts.clone(),
                             ) {
-                                spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
+                                if should_remove {
+                                    spawn_remove_reaction(client, &channel_id, &ts, &name, event_tx);
+                                } else {
+                                    spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
+                                }
                             }
                         } else if let Some(msg) = state.selected_message() {
                             let ts = msg.ts.clone();
                             if let Some(channel_id) = state.active_channel_id() {
-                                spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
+                                if should_remove {
+                                    spawn_remove_reaction(client, &channel_id, &ts, &name, event_tx);
+                                } else {
+                                    spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
+                                }
                             }
                         }
                         state.input_mode = InputMode::Normal;
                     }
                     crate::state::EmojiPickerSource::Insert => {
-                        // Insert :name: at cursor position
-                        let insert = format!(":{}:", name);
-                        state.input_text.insert_str(state.input_cursor, &insert);
-                        state.input_cursor += insert.len();
+                        if let Some(colon_pos) = inline {
+                            // Replace `:query` with `:name:` in input text
+                            let remove_len = 1 + state.emoji_picker_query.chars().count(); // ':' + query
+                            let start_byte: usize = state.input_text.char_indices()
+                                .nth(colon_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                            let end_byte: usize = state.input_text.char_indices()
+                                .nth(colon_pos + remove_len).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                            let insert = format!(":{}:", name);
+                            state.input_text.replace_range(start_byte..end_byte, &insert);
+                            state.input_cursor = colon_pos + insert.chars().count();
+                            state.emoji_picker_inline_colon_pos = None;
+                        } else {
+                            let insert = format!(":{}:", name);
+                            let byte_pos = state.input_cursor_byte_offset();
+                            state.input_text.insert_str(byte_pos, &insert);
+                            state.input_cursor += insert.chars().count();
+                        }
                         state.input_mode = InputMode::Insert;
                         state.focus = Focus::Input;
                     }
                 }
             } else {
-                state.input_mode = InputMode::Normal;
+                if inline.is_some() {
+                    state.emoji_picker_inline_colon_pos = None;
+                    state.input_mode = InputMode::Insert;
+                    state.focus = Focus::Input;
+                } else {
+                    state.input_mode = InputMode::Normal;
+                }
             }
         }
         KeyCode::Backspace => {
-            state.emoji_picker_query.pop();
+            if inline.is_some() && state.emoji_picker_query.is_empty() {
+                // Remove the ':' from input and close picker
+                let colon_pos = inline.unwrap();
+                let byte_pos: usize = state.input_text.char_indices()
+                    .nth(colon_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                if byte_pos < state.input_text.len() {
+                    state.input_text.remove(byte_pos);
+                }
+                state.input_cursor = colon_pos;
+                state.emoji_picker_inline_colon_pos = None;
+                state.input_mode = InputMode::Insert;
+                state.focus = Focus::Input;
+                return HandleResult::Continue;
+            }
+            if let Some(colon_pos) = inline {
+                // Also remove the character from input_text
+                state.emoji_picker_query.pop();
+                let query_len = state.emoji_picker_query.chars().count();
+                let char_pos = colon_pos + 1 + query_len;
+                let byte_pos: usize = state.input_text.char_indices()
+                    .nth(char_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                if byte_pos < state.input_text.len() {
+                    state.input_text.remove(byte_pos);
+                }
+                state.input_cursor = colon_pos + 1 + query_len;
+            } else {
+                state.emoji_picker_query.pop();
+            }
             state.filter_emoji_picker();
         }
-        KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('j') | KeyCode::Down if inline.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if !state.emoji_picker_results.is_empty() {
                 state.emoji_picker_selected =
                     (state.emoji_picker_selected + 1) % state.emoji_picker_results.len();
             }
         }
-        KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('k') | KeyCode::Up if inline.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !state.emoji_picker_results.is_empty() {
+                if state.emoji_picker_selected == 0 {
+                    state.emoji_picker_selected = state.emoji_picker_results.len() - 1;
+                } else {
+                    state.emoji_picker_selected -= 1;
+                }
+            }
+        }
+        KeyCode::Down => {
+            if !state.emoji_picker_results.is_empty() {
+                state.emoji_picker_selected =
+                    (state.emoji_picker_selected + 1) % state.emoji_picker_results.len();
+            }
+        }
+        KeyCode::Up => {
             if !state.emoji_picker_results.is_empty() {
                 if state.emoji_picker_selected == 0 {
                     state.emoji_picker_selected = state.emoji_picker_results.len() - 1;
@@ -958,6 +1115,13 @@ fn handle_emoji_picker_key<C: SlackApi>(
         }
         KeyCode::Char(c) => {
             state.emoji_picker_query.push(c);
+            if let Some(colon_pos) = inline {
+                let insert_char_pos = colon_pos + 1 + state.emoji_picker_query.chars().count() - 1;
+                let byte_pos: usize = state.input_text.char_indices()
+                    .nth(insert_char_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                state.input_text.insert(byte_pos, c);
+                state.input_cursor = insert_char_pos + 1;
+            }
             state.filter_emoji_picker();
         }
         _ => {}
@@ -974,27 +1138,30 @@ fn handle_user_picker_key(
     state.dirty = true;
     match key.code {
         KeyCode::Esc => {
-            state.input_text.insert(state.input_cursor, '@');
+            let byte_pos = state.input_cursor_byte_offset();
+            state.input_text.insert(byte_pos, '@');
             state.input_cursor += 1;
             state.input_mode = InputMode::Insert;
             state.focus = Focus::Input;
         }
         KeyCode::Enter => {
-            if let Some((user_id, _display)) = state
+            if let Some((user_id, display)) = state
                 .user_picker_results
                 .get(state.user_picker_selected)
                 .cloned()
             {
-                let insert = format!("<@{}>", user_id);
-                state.input_text.insert_str(state.input_cursor, &insert);
-                state.input_cursor += insert.len();
+                let insert = format!("<@{}|{}>", user_id, display);
+                let byte_pos = state.input_cursor_byte_offset();
+                state.input_text.insert_str(byte_pos, &insert);
+                state.input_cursor += insert.chars().count();
             }
             state.input_mode = InputMode::Insert;
             state.focus = Focus::Input;
         }
         KeyCode::Backspace => {
             if state.user_picker_query.is_empty() {
-                state.input_text.insert(state.input_cursor, '@');
+                let byte_pos = state.input_cursor_byte_offset();
+                state.input_text.insert(byte_pos, '@');
                 state.input_cursor += 1;
                 state.input_mode = InputMode::Insert;
                 state.focus = Focus::Input;
@@ -1076,16 +1243,19 @@ fn handle_global_search_key<C: SlackApi>(
                 {
                     if let Some(ch) = &result.channel {
                         let channel_id = ch.id.clone();
+                        state.save_current_draft();
                         state.global_search_results.clear();
                         state.input_mode = InputMode::Normal;
                         if let Some(idx) =
                             state.channels.iter().position(|c| c.id == channel_id)
                         {
                             state.selected_channel_idx = idx;
+                            state.sync_visual_from_selected_channel();
                             state.close_thread();
                             state.clear_message_search();
                             state.focus = Focus::Messages;
                             state.selected_message_idx = 0;
+                            state.restore_draft_for_current();
                             ensure_history_loaded(state, client, event_tx);
                         }
                     }
@@ -1143,7 +1313,7 @@ fn handle_mouse_event<C: SlackApi>(
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             if contains(state.channel_list_area, col, row) {
-                state.channel_prev();
+                state.channel_prev_no_wrap();
                 state.dirty = true;
             } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
                 let old = state.thread_scroll_offset;
@@ -1153,7 +1323,7 @@ fn handle_mouse_event<C: SlackApi>(
                     state.dirty = true;
                 }
             } else if contains(state.messages_area, col, row) {
-                if state.message_select_page(-1) {
+                if state.messages_scroll_lines(-(scroll_lines as isize)) {
                     state.dirty = true;
                 }
                 maybe_load_older(state, client, event_tx);
@@ -1161,7 +1331,7 @@ fn handle_mouse_event<C: SlackApi>(
         }
         MouseEventKind::ScrollDown => {
             if contains(state.channel_list_area, col, row) {
-                state.channel_next();
+                state.channel_next_no_wrap();
                 state.dirty = true;
             } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
                 let old = state.thread_scroll_offset;
@@ -1170,7 +1340,7 @@ fn handle_mouse_event<C: SlackApi>(
                     state.dirty = true;
                 }
             } else if contains(state.messages_area, col, row) {
-                if state.message_select_page(1) {
+                if state.messages_scroll_lines(scroll_lines as isize) {
                     state.dirty = true;
                 }
             }
@@ -1181,18 +1351,21 @@ fn handle_mouse_event<C: SlackApi>(
                 let inner_row = (row - state.channel_list_area.y).saturating_sub(1) as usize;
                 let visual_idx = state.channel_list_offset + inner_row;
                 if let Some(entry) = state.channel_list_items.get(visual_idx).cloned() {
+                    state.selected_visual_idx = visual_idx;
                     match entry {
-                        crate::state::ChannelListEntry::Channel(ch_idx) => {
+                        ChannelListEntry::Channel(ch_idx) => {
+                            state.save_current_draft();
                             state.selected_channel_idx = ch_idx;
                             state.selected_message_idx = 0;
                             state.focus = Focus::Messages;
                             state.input_mode = InputMode::Normal;
+                            state.restore_draft_for_current();
                             ensure_history_loaded(state, client, event_tx);
                         }
-                        crate::state::ChannelListEntry::SectionHeader(id) => {
+                        ChannelListEntry::SectionHeader(id) => {
                             state.toggle_section_collapse(&id);
                         }
-                        crate::state::ChannelListEntry::DmMore => {
+                        ChannelListEntry::DmMore => {
                             state.dm_list_expanded = !state.dm_list_expanded;
                         }
                         _ => {}
@@ -1221,11 +1394,50 @@ fn handle_mouse_event<C: SlackApi>(
                 state.dirty = true;
             }
         }
+        MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+            if contains(state.messages_area, col, row) {
+                // Right-click on messages: select the message and open context menu
+                if let Some(info) = &state.messages_render_info {
+                    let click_row = (row - info.inner_y) as usize;
+                    let vline = info.scroll_y + click_row;
+                    let msg_count = state.message_count();
+                    if msg_count > 0 && !state.message_line_starts.is_empty() {
+                        let msg_idx = match state.message_line_starts.binary_search(&vline) {
+                            Ok(i) => i,
+                            Err(i) => i.saturating_sub(1),
+                        };
+                        if msg_idx < msg_count {
+                            state.selected_message_idx =
+                                msg_count.saturating_sub(1).saturating_sub(msg_idx);
+                            state.focus = Focus::Messages;
+                            state.show_context_menu = true;
+                            state.context_menu_selected = 0;
+                        }
+                    }
+                }
+                state.dirty = true;
+            }
+        }
         _ => {}
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn switch_channel<C: SlackApi>(
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+    switch: impl FnOnce(&mut AppState),
+) {
+    state.save_current_draft();
+    switch(state);
+    state.restore_draft_for_current();
+    state.selected_message_idx = 0;
+    state.messages_scroll_override = None;
+    state.clear_message_search();
+    ensure_history_loaded(state, client, event_tx);
+}
 
 fn open_thread_for_selected<C: SlackApi>(
     state: &mut AppState,
@@ -1244,19 +1456,80 @@ fn open_thread_for_selected<C: SlackApi>(
     }
 }
 
+fn char_pos_to_byte(text: &str, pos: usize) -> usize {
+    text.char_indices()
+        .nth(pos)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
+}
+
+fn find_word_boundary_backward(chars: &[char], from: usize) -> usize {
+    let mut pos = from;
+    while pos > 0 && chars[pos - 1].is_whitespace() {
+        pos -= 1;
+    }
+    while pos > 0 && !chars[pos - 1].is_whitespace() {
+        pos -= 1;
+    }
+    pos
+}
+
+fn find_word_boundary_forward(chars: &[char], from: usize) -> usize {
+    let len = chars.len();
+    let mut pos = from;
+    while pos < len && !chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    while pos < len && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
 fn delete_word_backward(state: &mut AppState) {
     if state.input_cursor == 0 {
         return;
     }
-    let mut pos = state.input_cursor;
-    while pos > 0 && state.input_text.as_bytes()[pos - 1] == b' ' {
-        pos -= 1;
-    }
-    while pos > 0 && state.input_text.as_bytes()[pos - 1] != b' ' {
-        pos -= 1;
-    }
-    state.input_text.drain(pos..state.input_cursor);
+    let chars: Vec<char> = state.input_text.chars().collect();
+    let pos = find_word_boundary_backward(&chars, state.input_cursor);
+    let byte_start = char_pos_to_byte(&state.input_text, pos);
+    let byte_end = state.input_cursor_byte_offset();
+    let killed: String = state.input_text.drain(byte_start..byte_end).collect();
+    state.push_kill_ring(killed);
     state.input_cursor = pos;
+}
+
+fn word_forward(state: &mut AppState) {
+    let chars: Vec<char> = state.input_text.chars().collect();
+    state.input_cursor = find_word_boundary_forward(&chars, state.input_cursor);
+}
+
+fn word_backward(state: &mut AppState) {
+    let chars: Vec<char> = state.input_text.chars().collect();
+    state.input_cursor = find_word_boundary_backward(&chars, state.input_cursor);
+}
+
+fn delete_word_forward(state: &mut AppState) {
+    let chars: Vec<char> = state.input_text.chars().collect();
+    if state.input_cursor >= chars.len() {
+        return;
+    }
+    let pos = find_word_boundary_forward(&chars, state.input_cursor);
+    let byte_start = state.input_cursor_byte_offset();
+    let byte_end = char_pos_to_byte(&state.input_text, pos);
+    let killed: String = state.input_text.drain(byte_start..byte_end).collect();
+    state.push_kill_ring(killed);
+}
+
+fn open_external_editor(state: &mut AppState) -> HandleResult {
+    let tmp = std::env::temp_dir().join(format!("slackslack-{}.txt", std::process::id()));
+
+    if std::fs::write(&tmp, &state.input_text).is_err() {
+        state.last_error = Some("Failed to write temp file".into());
+        return HandleResult::Continue;
+    }
+
+    HandleResult::SuspendForEditor(tmp)
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────────
@@ -1341,11 +1614,12 @@ fn handle_ws_message(ws_msg: WsMessage, state: &mut AppState) {
         None
     };
     let notify_text = if should_notify {
-        let text = &ws_msg.text;
-        if text.len() > 100 {
-            format!("{}...", &text[..97])
+        let formatted = crate::ui::messages::resolve_slack_markup_pub(&ws_msg.text, state);
+        if formatted.chars().count() > 100 {
+            let truncated: String = formatted.chars().take(97).collect();
+            format!("{}...", truncated)
         } else {
-            text.clone()
+            formatted
         }
     } else {
         String::new()
@@ -1401,8 +1675,14 @@ fn maybe_load_older<C: SlackApi>(
     event_tx: &mpsc::UnboundedSender<Event>,
 ) {
     if let Some(channel_id) = state.active_channel_id() {
-        let max = state.message_count().saturating_sub(1);
-        let near_top = state.selected_message_idx >= max.saturating_sub(5);
+        let near_top = if state.messages_scroll_override.is_some() {
+            state.messages_scroll_override
+                .map(|s| s + 20 >= state.max_scroll_offset && state.max_scroll_offset > 0)
+                .unwrap_or(false)
+        } else {
+            let max = state.message_count().saturating_sub(1);
+            state.selected_message_idx >= max.saturating_sub(5)
+        };
 
         if let Some(cd) = state.channel_data.get(&channel_id) {
             if near_top && cd.has_more_history && !cd.loading_more_history {
@@ -1621,6 +1901,26 @@ fn spawn_add_reaction<C: SlackApi>(
         if let Err(e) = client.reactions_add(&channel_id, &ts, &emoji).await {
             error!("Failed to add reaction: {}", e);
             let _ = tx.send(Event::ApiError(format!("Reaction: {}", e)));
+        }
+    });
+}
+
+fn spawn_remove_reaction<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    ts: &str,
+    emoji: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let ts = ts.to_string();
+    let emoji = emoji.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = client.reactions_remove(&channel_id, &ts, &emoji).await {
+            error!("Failed to remove reaction: {}", e);
+            let _ = tx.send(Event::ApiError(format!("Reaction remove: {}", e)));
         }
     });
 }
@@ -1881,7 +2181,213 @@ fn spawn_download_image<C: SlackApi>(
     });
 }
 
+// ── Context menu ─────────────────────────────────────────────────────────────
+
+fn handle_context_menu_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+    let item_count = crate::ui::context_menu::MENU_ITEMS.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(' ') => {
+            state.show_context_menu = false;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.context_menu_selected = (state.context_menu_selected + 1) % item_count;
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.context_menu_selected =
+                (state.context_menu_selected + item_count - 1) % item_count;
+        }
+        KeyCode::Enter | KeyCode::Char('l') => {
+            let selected = state.context_menu_selected;
+            state.show_context_menu = false;
+            return dispatch_context_menu_action(selected, state, client, event_tx);
+        }
+        KeyCode::Char('R') => {
+            state.show_context_menu = false;
+            return dispatch_context_menu_action(1, state, client, event_tx);
+        }
+        KeyCode::Char('r') => {
+            state.show_context_menu = false;
+            return dispatch_context_menu_action(2, state, client, event_tx);
+        }
+        KeyCode::Char('y') => {
+            state.show_context_menu = false;
+            return dispatch_context_menu_action(3, state, client, event_tx);
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+fn dispatch_context_menu_action<C: SlackApi>(
+    action_idx: usize,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    match action_idx {
+        0 => {
+            // Open thread
+            open_thread_for_selected(state, client, event_tx);
+        }
+        1 => {
+            // Reply in thread
+            open_thread_for_selected(state, client, event_tx);
+            state.reply_to_thread = true;
+            state.input_mode = InputMode::Insert;
+            state.focus = Focus::Input;
+        }
+        2 => {
+            // React with emoji
+            if state.selected_message().is_some() {
+                let reactions = state.selected_message_reactions();
+                state.open_emoji_picker(crate::state::EmojiPickerSource::Reaction, reactions);
+            }
+        }
+        3 => {
+            // Copy message
+            if let Some(msg) = state.selected_message() {
+                let text = msg.text.clone();
+                state.clipboard_pending = Some(text);
+            }
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── File path input mode ─────────────────────────────────────────────────────
+
+fn handle_file_path_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Insert;
+            state.file_path_input.clear();
+            state.file_path_cursor = 0;
+            state.upload_status = None;
+        }
+        KeyCode::Enter => {
+            let raw_path = state.file_path_input.trim().to_string();
+            if raw_path.is_empty() {
+                state.input_mode = InputMode::Insert;
+                state.upload_status = None;
+                return HandleResult::Continue;
+            }
+            let expanded = shellexpand::tilde(&raw_path).to_string();
+            let path = std::path::PathBuf::from(&expanded);
+            let data = match std::fs::read(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    state.upload_status = Some(format!("Read error: {}", e));
+                    return HandleResult::Continue;
+                }
+            };
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string());
+
+            let thread_ts = if state.reply_to_thread {
+                state.thread_parent_ts.clone()
+            } else {
+                None
+            };
+
+            if let Some(channel_id) = state.active_channel_id() {
+                state.upload_status = Some(format!("Uploading {}...", filename));
+                spawn_file_upload(
+                    client,
+                    &channel_id,
+                    thread_ts.as_deref(),
+                    &filename,
+                    data,
+                    event_tx,
+                );
+            }
+        }
+        KeyCode::Backspace => {
+            if state.file_path_cursor > 0 {
+                state.file_path_cursor -= 1;
+                let byte_pos: usize = state.file_path_input.char_indices()
+                    .nth(state.file_path_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(state.file_path_input.len());
+                let ch = state.file_path_input[byte_pos..].chars().next().unwrap();
+                state.file_path_input.drain(byte_pos..byte_pos + ch.len_utf8());
+            }
+        }
+        KeyCode::Left => {
+            if state.file_path_cursor > 0 {
+                state.file_path_cursor -= 1;
+            }
+        }
+        KeyCode::Right => {
+            let char_count = state.file_path_input.chars().count();
+            if state.file_path_cursor < char_count {
+                state.file_path_cursor += 1;
+            }
+        }
+        KeyCode::Home => state.file_path_cursor = 0,
+        KeyCode::End => state.file_path_cursor = state.file_path_input.chars().count(),
+        KeyCode::Char(c) => {
+            let byte_pos: usize = state.file_path_input.char_indices()
+                .nth(state.file_path_cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(state.file_path_input.len());
+            state.file_path_input.insert(byte_pos, c);
+            state.file_path_cursor += 1;
+            state.upload_status = None;
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+fn spawn_file_upload<C: SlackApi>(
+    client: &C,
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    filename: &str,
+    data: Vec<u8>,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let channel_id = channel_id.to_string();
+    let thread_ts = thread_ts.map(|s| s.to_string());
+    let filename = filename.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client
+            .files_upload(&channel_id, thread_ts.as_deref(), &filename, data)
+            .await
+        {
+            Ok(_) => {
+                let _ = tx.send(Event::FileUploaded {
+                    channel_id,
+                    filename,
+                });
+            }
+            Err(e) => {
+                error!("Failed to upload file: {}", e);
+                let _ = tx.send(Event::ApiError(format!("Upload: {}", e)));
+            }
+        }
+    });
+}
+
 pub enum HandleResult {
     Continue,
     Quit,
+    SuspendForEditor(std::path::PathBuf),
 }

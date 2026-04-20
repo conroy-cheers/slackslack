@@ -1,11 +1,9 @@
 use crate::state::{AppState, Focus, ImagePlacement, ThreadRenderInfo};
-use crate::ui::emoji;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
-use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     state.thread_placements.clear();
@@ -207,29 +205,7 @@ fn render_thread_message(
                 spans.push(Span::from(String::from(" ")));
                 col += 1;
             }
-            if let Some(e) = emoji::emoji_for(&r.name) {
-                let display = e.to_string();
-                col += UnicodeWidthStr::width(display.as_str()) as u16;
-                spans.push(Span::styled(display, Style::default().fg(Color::Yellow)));
-            } else if state.has_emoji_image(&r.name) {
-                let key = state.resolve_emoji_key(&r.name).unwrap();
-                placements.push(ImagePlacement {
-                    url: key,
-                    line: reaction_line,
-                    col,
-                    display_cols: 2,
-                    display_rows: 1,
-                });
-                spans.push(Span::styled("  ".to_string(), Style::default()));
-                col += 2;
-            } else {
-                if state.custom_emoji.contains_key(&r.name) || state.resolve_emoji_key(&r.name).is_some() {
-                    emoji_needed.push(r.name.clone());
-                }
-                let display = format!(":{}:", r.name);
-                col += UnicodeWidthStr::width(display.as_str()) as u16;
-                spans.push(Span::styled(display, Style::default().fg(Color::Yellow)));
-            }
+            super::messages::render_reaction_emoji(&r.name, state, reaction_line, &mut col, &mut spans, placements, emoji_needed);
             let count_str = format!(" {}", r.count);
             col += count_str.len() as u16;
             spans.push(Span::styled(count_str, Style::default().fg(Color::DarkGray)));

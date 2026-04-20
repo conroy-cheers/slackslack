@@ -15,6 +15,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         InputMode::EmojiPicker => " EMOJI ",
         InputMode::UserPicker => " @USER ",
         InputMode::GlobalSearch => " SEARCH ",
+        InputMode::FilePath => " UPLOAD ",
     };
     let mode_style = match state.input_mode {
         InputMode::Normal => Style::default()
@@ -30,6 +31,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
         InputMode::Reaction | InputMode::EmojiPicker | InputMode::UserPicker => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        InputMode::FilePath => Style::default()
             .fg(Color::Black)
             .bg(Color::Magenta)
             .add_modifier(Modifier::BOLD),

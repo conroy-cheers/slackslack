@@ -14,12 +14,14 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     let mut items: Vec<ListItem> = Vec::new();
     let mut list_entries: Vec<ChannelListEntry> = Vec::new();
+    let mut custom_emoji_headers: Vec<(usize, String)> = Vec::new(); // (visual_idx, emoji_name)
 
     if is_searching {
         // Flat filtered list during search
         let visible_indices = state.filtered_channel_indices();
         for &ch_idx in &visible_indices {
-            let item = render_channel_item(state, ch_idx, max_name_width, is_focused, is_searching);
+            let vis_idx = items.len();
+            let item = render_channel_item(state, ch_idx, vis_idx, max_name_width, is_focused, is_searching);
             items.push(item);
             list_entries.push(ChannelListEntry::Channel(ch_idx));
         }
@@ -27,7 +29,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         // Section-based layout
         let sections = state.channels_by_section();
 
-        for (sec_idx, (section_name, section_id, ch_indices)) in sections.iter().enumerate() {
+        for (sec_idx, (section_name, section_id, ch_indices, section_emoji)) in sections.iter().enumerate() {
             // Spacer between sections (except first)
             if sec_idx > 0 {
                 items.push(ListItem::new(Line::from("")));
@@ -54,12 +56,27 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
             } else {
                 ""
             };
-            items.push(ListItem::new(Line::from(Span::styled(
-                format!(" {}{}", collapse_indicator, section_name),
+            let header_visual_idx = items.len();
+            let header_selected = header_visual_idx == state.selected_visual_idx && is_focused;
+            let header_style = if header_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
                 Style::default()
                     .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                    .add_modifier(Modifier::BOLD)
+            };
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!(" {}{}", collapse_indicator, section_name),
+                header_style,
             ))));
+            if let Some(emoji_name) = section_emoji {
+                if crate::ui::emoji::emoji_for_runtime(emoji_name, &state.standard_emoji).is_none() {
+                    custom_emoji_headers.push((header_visual_idx, emoji_name.clone()));
+                }
+            }
             list_entries.push(if let Some(id) = section_id {
                 ChannelListEntry::SectionHeader(id.clone())
             } else if is_dm_section {
@@ -82,15 +99,23 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
             };
 
             for &ch_idx in visible_channels {
-                let item = render_channel_item(state, ch_idx, max_name_width, is_focused, is_searching);
+                let vis_idx = items.len();
+                let item = render_channel_item(state, ch_idx, vis_idx, max_name_width, is_focused, is_searching);
                 items.push(item);
                 list_entries.push(ChannelListEntry::Channel(ch_idx));
             }
 
             if hidden_count > 0 {
+                let more_visual_idx = items.len();
+                let more_selected = more_visual_idx == state.selected_visual_idx && is_focused;
+                let more_style = if more_selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 items.push(ListItem::new(Line::from(Span::styled(
                     format!("  {} more...", hidden_count),
-                    Style::default().fg(Color::DarkGray),
+                    more_style,
                 ))));
                 list_entries.push(ChannelListEntry::DmMore);
             }
@@ -122,12 +147,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
             .title(title),
     );
 
-    // Find the visual index for the selected channel
-    let visual_idx = state
-        .channel_list_items
-        .iter()
-        .position(|entry| matches!(entry, ChannelListEntry::Channel(idx) if *idx == state.selected_channel_idx))
-        .unwrap_or(0);
+    // Clamp visual index to valid range after list rebuild
+    let visual_idx = state.selected_visual_idx.min(items_len.saturating_sub(1));
 
     // Adjust scroll offset so viewport only moves when selection enters top/bottom quarter
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -148,7 +169,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     }
 
     let mut list_state = ListState::default();
-    list_state.select(Some(visual_idx));
+    list_state.select(None);
     *list_state.offset_mut() = state.channel_list_offset;
 
     frame.render_stateful_widget(list, area, &mut list_state);
@@ -171,36 +192,55 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         let mut scrollbar_state = ScrollbarState::new(items_len).position(visual_idx);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
+
+    // Place custom emoji images in section headers
+    let inner_y = area.y + 1; // account for border
+    let inner_x = area.x + 1;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    for (vis_idx, emoji_name) in &custom_emoji_headers {
+        if *vis_idx < state.channel_list_offset {
+            continue;
+        }
+        let row_in_view = vis_idx - state.channel_list_offset;
+        if row_in_view >= inner_height {
+            continue;
+        }
+        let screen_row = inner_y + row_in_view as u16;
+        // Emoji goes after the collapse indicator: " ▾ " = 4 chars, or " " = 1 char for no-indicator
+        let emoji_col = inner_x + 3;
+        state.place_inline_emoji(emoji_name, screen_row, emoji_col);
+    }
 }
 
 fn render_channel_item<'a>(
     state: &AppState,
     ch_idx: usize,
+    visual_idx: usize,
     max_name_width: usize,
     is_focused: bool,
     is_searching: bool,
 ) -> ListItem<'a> {
     let ch = &state.channels[ch_idx];
 
-    let (prefix, name) = if ch.is_im {
-        let name = ch
+    let (prefix, name, name_color) = if ch.is_im {
+        let (name, color) = ch
             .user
             .as_ref()
-            .map(|uid| state.user_display_name(uid).to_string())
-            .unwrap_or_else(|| ch.display_name().to_string());
-        ("  ", name)
+            .map(|uid| (state.user_display_name(uid).to_string(), Some(state.user_color(uid))))
+            .unwrap_or_else(|| (ch.display_name().to_string(), None));
+        ("  ", name, color)
     } else if ch.is_mpim {
         let name = state.mpim_display_name(ch);
-        ("  ", name)
+        ("  ", name, None)
     } else if ch.is_private {
-        ("  \u{1F512} ", ch.display_name().to_string())
+        ("  \u{1F512} ", ch.display_name().to_string(), None)
     } else {
-        ("  # ", ch.display_name().to_string())
+        ("  # ", ch.display_name().to_string(), None)
     };
 
     let name = truncate_str(&name, max_name_width.saturating_sub(prefix.len()));
 
-    let is_selected = ch_idx == state.selected_channel_idx;
+    let is_selected = visual_idx == state.selected_visual_idx;
     let has_unread = ch.unread_count_display > 0;
 
     let style = if is_selected {
@@ -216,6 +256,8 @@ fn render_channel_item<'a>(
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
+    } else if let Some(color) = name_color {
+        Style::default().fg(color)
     } else {
         Style::default().fg(Color::Gray)
     };

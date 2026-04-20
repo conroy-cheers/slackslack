@@ -1,12 +1,11 @@
-/// Emoji shortcode-to-Unicode mapping for Slack messages.
-///
-/// Replaces `:shortcode:` patterns in text with their Unicode equivalents.
-/// Handles skin-tone modifier shortcodes by stripping them (terminal rendering
-/// of ZWJ skin-tone sequences is unreliable).
+use std::collections::HashMap;
 
-/// Look up the Unicode emoji for a given shortcode (without surrounding colons).
-///
-/// Returns `None` if the shortcode is not recognized.
+/// Look up emoji from the runtime-fetched database, falling back to the hardcoded table.
+pub fn emoji_for_runtime<'a>(shortcode: &str, standard_emoji: &'a HashMap<String, String>) -> Option<&'a str> {
+    standard_emoji.get(shortcode).map(|s| s.as_str())
+        .or_else(|| emoji_for(shortcode))
+}
+
 pub fn emoji_for(shortcode: &str) -> Option<&'static str> {
     let emoji = match shortcode {
         // ---- Faces / people ----
@@ -135,7 +134,7 @@ pub fn emoji_for(shortcode: &str) -> Option<&'static str> {
         "grey_question" => "\u{2754}",
         "exclamation" | "heavy_exclamation_mark" => "\u{2757}",
         "red_circle" => "\u{1F534}",
-        "large_blue_circle" => "\u{1F535}",
+        "large_blue_circle" | "blue_circle" => "\u{1F535}",
         "white_circle" => "\u{26AA}",
         "black_circle" => "\u{26AB}",
         "checkered_flag" => "\u{1F3C1}",
@@ -251,6 +250,170 @@ pub fn emoji_for(shortcode: &str) -> Option<&'static str> {
         "wave_dash" => "\u{3030}\u{FE0F}",
         "black_heart" => "\u{1F5A4}",
 
+        // ---- Keycap numbers / symbols ----
+        "zero" => "0\u{FE0F}\u{20E3}",
+        "one" => "1\u{FE0F}\u{20E3}",
+        "two" => "2\u{FE0F}\u{20E3}",
+        "three" => "3\u{FE0F}\u{20E3}",
+        "four" => "4\u{FE0F}\u{20E3}",
+        "five" => "5\u{FE0F}\u{20E3}",
+        "six" => "6\u{FE0F}\u{20E3}",
+        "seven" => "7\u{FE0F}\u{20E3}",
+        "eight" => "8\u{FE0F}\u{20E3}",
+        "nine" => "9\u{FE0F}\u{20E3}",
+        "keycap_ten" | "ten" => "\u{1F51F}",
+        "hash" => "#\u{FE0F}\u{20E3}",
+        "asterisk" | "keycap_star" => "*\u{FE0F}\u{20E3}",
+
+        // ---- Zodiac ----
+        "aries" => "\u{2648}",
+        "taurus" => "\u{2649}",
+        "gemini" => "\u{264A}",
+        "cancer" => "\u{264B}",
+        "leo" => "\u{264C}",
+        "virgo" => "\u{264D}",
+        "libra" => "\u{264E}",
+        "scorpius" => "\u{264F}",
+        "sagittarius" => "\u{2650}",
+        "capricorn" => "\u{2651}",
+        "aquarius" => "\u{2652}",
+        "pisces" => "\u{2653}",
+
+        // ---- Arrows (additional) ----
+        "arrow_upper_right" => "\u{2197}\u{FE0F}",
+        "arrow_lower_right" => "\u{2198}\u{FE0F}",
+        "arrow_lower_left" => "\u{2199}\u{FE0F}",
+        "arrow_upper_left" => "\u{2196}\u{FE0F}",
+        "arrow_up_down" => "\u{2195}\u{FE0F}",
+        "left_right_arrow" => "\u{2194}\u{FE0F}",
+        "arrow_right_hook" => "\u{21AA}\u{FE0F}",
+        "leftwards_arrow_with_hook" => "\u{21A9}\u{FE0F}",
+        "arrow_heading_up" => "\u{2934}\u{FE0F}",
+        "arrow_heading_down" => "\u{2935}\u{FE0F}",
+        "twisted_rightwards_arrows" => "\u{1F500}",
+        "repeat" => "\u{1F501}",
+        "repeat_one" => "\u{1F502}",
+        "back" => "\u{1F519}",
+        "end" => "\u{1F51A}",
+        "on" => "\u{1F51B}",
+        "soon" => "\u{1F51C}",
+        "top" => "\u{1F51D}",
+
+        // ---- Geometric / shapes ----
+        "orange_circle" => "\u{1F7E0}",
+        "yellow_circle" => "\u{1F7E1}",
+        "green_circle" => "\u{1F7E2}",
+        "purple_circle" => "\u{1F7E3}",
+        "brown_circle" => "\u{1F7E4}",
+        "large_red_square" | "red_square" => "\u{1F7E5}",
+        "large_orange_square" | "orange_square" => "\u{1F7E7}",
+        "large_yellow_square" | "yellow_square" => "\u{1F7E8}",
+        "large_green_square" | "green_square" => "\u{1F7E9}",
+        "large_blue_square" | "blue_square" => "\u{1F7E6}",
+        "large_purple_square" | "purple_square" => "\u{1F7EA}",
+        "large_brown_square" | "brown_square" => "\u{1F7EB}",
+        "black_large_square" => "\u{2B1B}",
+        "white_large_square" => "\u{2B1C}",
+        "black_medium_square" => "\u{25FC}\u{FE0F}",
+        "white_medium_square" => "\u{25FB}\u{FE0F}",
+        "black_medium_small_square" => "\u{25FE}",
+        "white_medium_small_square" => "\u{25FD}",
+        "black_small_square" => "\u{25AA}\u{FE0F}",
+        "white_small_square" => "\u{25AB}\u{FE0F}",
+        "diamond_shape_with_a_dot_inside" => "\u{1F4A0}",
+        "small_red_triangle" => "\u{1F53A}",
+        "small_red_triangle_down" => "\u{1F53B}",
+        "small_orange_diamond" => "\u{1F538}",
+        "small_blue_diamond" => "\u{1F539}",
+        "large_orange_diamond" => "\u{1F536}",
+        "large_blue_diamond" => "\u{1F537}",
+        "radio_button" => "\u{1F518}",
+
+        // ---- Additional (not in original table) ----
+        "partly_sunny" | "sun_behind_cloud" => "\u{26C5}",
+        "snowman_without_snow" => "\u{26C4}",
+        "comet" => "\u{2604}\u{FE0F}",
+        "no_entry_sign" => "\u{1F6AB}",
+        "o" | "heavy_large_circle" => "\u{2B55}",
+        "grey_exclamation" => "\u{2755}",
+        "white_exclamation_mark" => "\u{2755}",
+        "white_question_mark" => "\u{2754}",
+        "interrobang" => "\u{2049}\u{FE0F}",
+        "low_brightness" => "\u{1F505}",
+        "high_brightness" => "\u{1F506}",
+        "mute" => "\u{1F507}",
+        "speaker" => "\u{1F508}",
+        "sound" | "loud_sound" => "\u{1F50A}",
+        "no_bell" => "\u{1F515}",
+        "first_place_medal" | "1st_place_medal" => "\u{1F947}",
+        "second_place_medal" | "2nd_place_medal" => "\u{1F948}",
+        "third_place_medal" | "3rd_place_medal" => "\u{1F949}",
+        "soccer" => "\u{26BD}",
+        "basketball" => "\u{1F3C0}",
+        "football" => "\u{1F3C8}",
+        "baseball" => "\u{26BE}",
+        "tennis" => "\u{1F3BE}",
+        "dart" => "\u{1F3AF}",
+        "bowling" => "\u{1F3B3}",
+        "golf" | "golfing" => "\u{1F3CC}\u{FE0F}",
+        "video_game" | "joystick" => "\u{1F3AE}",
+        "slot_machine" => "\u{1F3B0}",
+        "game_die" => "\u{1F3B2}",
+        "musical_note" => "\u{1F3B5}",
+        "notes" | "musical_notes" => "\u{1F3B6}",
+        "microphone" => "\u{1F3A4}",
+        "headphones" | "headphone" => "\u{1F3A7}",
+        "guitar" => "\u{1F3B8}",
+        "trumpet" => "\u{1F3BA}",
+        "drum" | "drum_with_drumsticks" => "\u{1F941}",
+        "movie_camera" => "\u{1F3A5}",
+        "clapper" | "clapper_board" => "\u{1F3AC}",
+        "tv" | "television" => "\u{1F4FA}",
+        "camera" => "\u{1F4F7}",
+        "computer" | "desktop_computer" => "\u{1F4BB}",
+        "keyboard" => "\u{2328}\u{FE0F}",
+        "phone" | "telephone" => "\u{260E}\u{FE0F}",
+        "mobile_phone" | "iphone" => "\u{1F4F1}",
+        "battery" => "\u{1F50B}",
+        "electric_plug" => "\u{1F50C}",
+        "light_bulb" => "\u{1F4A1}",
+        "flashlight" => "\u{1F526}",
+        "candle" => "\u{1F56F}\u{FE0F}",
+        "wastebasket" => "\u{1F5D1}\u{FE0F}",
+        "nut_and_bolt" => "\u{1F529}",
+        "mag" | "mag_right" => "\u{1F50D}",
+        "microscope" => "\u{1F52C}",
+        "telescope" => "\u{1F52D}",
+        "crystal_ball" => "\u{1F52E}",
+        "bomb" => "\u{1F4A3}",
+        "knife" | "hocho" => "\u{1F52A}",
+        "shield" => "\u{1F6E1}\u{FE0F}",
+        "skull_and_crossbones" => "\u{2620}\u{FE0F}",
+        "radioactive" => "\u{2622}\u{FE0F}",
+        "biohazard" => "\u{2623}\u{FE0F}",
+        "peace" | "peace_symbol" => "\u{262E}\u{FE0F}",
+        "atom" | "atom_symbol" => "\u{269B}\u{FE0F}",
+        "rainbow_flag" => "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
+        "tongue" => "\u{1F445}",
+        "lips" => "\u{1F444}",
+        "alien" => "\u{1F47D}",
+        "jack_o_lantern" => "\u{1F383}",
+        "christmas_tree" => "\u{1F384}",
+        "santa" => "\u{1F385}",
+        "fireworks" => "\u{1F386}",
+        "door" => "\u{1F6AA}",
+        "toilet" => "\u{1F6BD}",
+        "shower" => "\u{1F6BF}",
+        "car" | "red_car" | "automobile" => "\u{1F697}",
+        "taxi" => "\u{1F695}",
+        "bus" => "\u{1F68C}",
+        "airplane" => "\u{2708}\u{FE0F}",
+        "sailboat" => "\u{26F5}",
+        "train" | "railway_car" => "\u{1F683}",
+        "house" => "\u{1F3E0}",
+        "church" => "\u{26EA}",
+        "tent" => "\u{26FA}",
+
         _ => return None,
     };
     Some(emoji)
@@ -275,7 +438,14 @@ fn is_skin_tone_modifier(shortcode: &str) -> bool {
 ///
 /// The function avoids allocating when the input contains no colons.
 pub fn replace_emoji_shortcodes(text: &str) -> String {
-    // Fast path: no colons means nothing to replace.
+    replace_emoji_impl(text, |sc| emoji_for(sc))
+}
+
+pub fn replace_emoji_shortcodes_with_map(text: &str, standard_emoji: &HashMap<String, String>) -> String {
+    replace_emoji_impl(text, |sc| emoji_for_runtime(sc, standard_emoji))
+}
+
+fn replace_emoji_impl<'a>(text: &str, lookup: impl Fn(&str) -> Option<&'a str>) -> String {
     if !text.contains(':') {
         return text.to_owned();
     }
@@ -287,8 +457,6 @@ pub fn replace_emoji_shortcodes(text: &str) -> String {
 
     while i < len {
         if bytes[i] == b':' {
-            // Look for the closing colon. Shortcodes contain [a-zA-Z0-9_+\-].
-            // We cap the scan at a reasonable max length to avoid degenerate cases.
             const MAX_SHORTCODE_LEN: usize = 64;
             let start = i;
             let mut found_end = false;
@@ -298,27 +466,23 @@ pub fn replace_emoji_shortcodes(text: &str) -> String {
             while j < limit {
                 let b = bytes[j];
                 if b == b':' {
-                    // We found a closing colon.
                     let shortcode = &text[start + 1..j];
                     if !shortcode.is_empty() {
                         if is_skin_tone_modifier(shortcode) {
-                            // Silently drop skin-tone modifiers.
                             i = j + 1;
                             found_end = true;
                             break;
-                        } else if let Some(emoji) = emoji_for(shortcode) {
+                        } else if let Some(emoji) = lookup(shortcode) {
                             result.push_str(emoji);
                             i = j + 1;
                             found_end = true;
                             break;
                         }
                     }
-                    // Not a known shortcode — treat the opening colon as literal.
                     break;
                 } else if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+' {
                     j += 1;
                 } else {
-                    // Invalid character for a shortcode — bail out.
                     break;
                 }
             }
@@ -328,7 +492,6 @@ pub fn replace_emoji_shortcodes(text: &str) -> String {
                 i = start + 1;
             }
         } else {
-            // Regular character — find the next colon (or end) and bulk-copy.
             let start = i;
             i += 1;
             while i < len && bytes[i] != b':' {

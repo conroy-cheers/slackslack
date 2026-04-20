@@ -252,7 +252,7 @@ fn channel_sections_render_no_panic() {
 #[test]
 fn emoji_picker_render_no_panic() {
     let mut state = state_with_image_messages(5, 0);
-    state.open_emoji_picker(EmojiPickerSource::Reaction);
+    state.open_emoji_picker(EmojiPickerSource::Reaction, vec![]);
     assert_eq!(state.input_mode, InputMode::EmojiPicker);
 
     let backend = TestBackend::new(100, 30);

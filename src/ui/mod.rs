@@ -1,4 +1,5 @@
 mod channels;
+pub(crate) mod context_menu;
 pub mod emoji;
 mod emoji_picker;
 mod global_search;
@@ -48,16 +49,20 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let has_search_bar =
         state.input_mode == InputMode::MessageSearch || state.message_search_active;
 
+    let inner_input_width = content_area.width.saturating_sub(2);
+    let raw_input_height = input::compute_input_height(&state.input_text, inner_input_width);
+    let max_input = (content_area.height / 3).max(3).min(10);
+    let input_height = raw_input_height.clamp(3, max_input);
     let content_constraints: Vec<Constraint> = if has_search_bar {
         vec![
-            Constraint::Length(1), // search bar
-            Constraint::Min(0),    // messages (+thread)
-            Constraint::Length(3), // input
+            Constraint::Length(1),            // search bar
+            Constraint::Min(0),               // messages (+thread)
+            Constraint::Length(input_height),  // input
         ]
     } else {
         vec![
-            Constraint::Min(0),    // messages (+thread)
-            Constraint::Length(3), // input
+            Constraint::Min(0),               // messages (+thread)
+            Constraint::Length(input_height),  // input
         ]
     };
     let content_chunks = Layout::default()
@@ -110,8 +115,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     // Set cursor position based on current mode
     match state.input_mode {
         InputMode::Insert => {
-            let x = input_area.x + 1 + state.input_cursor as u16;
-            let y = input_area.y + 1;
+            let inner_width = input_area.width.saturating_sub(2);
+            let (cx, cy) = input::cursor_display_position(&state.input_text, state.input_cursor, inner_width);
+            let x = input_area.x + 1 + cx;
+            let y = input_area.y + 1 + cy.saturating_sub(state.input_scroll);
             frame.set_cursor_position((x, y));
         }
         InputMode::Reaction => {
@@ -131,6 +138,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
                 let y = area.y;
                 frame.set_cursor_position((x, y));
             }
+        }
+        InputMode::FilePath => {
+            let inner_width = input_area.width.saturating_sub(2);
+            let x = input_area.x + 1 + (state.file_path_cursor as u16).min(inner_width);
+            let y = input_area.y + 1;
+            frame.set_cursor_position((x, y));
         }
         InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker | InputMode::GlobalSearch => {}
     }
@@ -159,6 +172,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         state.occlusion_rects.push(global_search::overlay_rect(frame.area()));
     }
 
+    // Message context menu
+    if state.show_context_menu {
+        let msg_area = state.messages_area;
+        context_menu::render(frame, state, msg_area);
+        state.occlusion_rects.push(context_menu::overlay_rect(state, msg_area));
+    }
 }
 
 #[cfg(test)]

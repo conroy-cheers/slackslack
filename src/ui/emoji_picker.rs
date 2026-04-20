@@ -9,10 +9,17 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let area = centered_rect(50, 60, frame.area());
     frame.render_widget(Clear, area);
 
+    let title = if matches!(state.emoji_picker_source, crate::state::EmojiPickerSource::Reaction)
+        && !state.emoji_picker_message_reactions.is_empty()
+    {
+        " React — ↑↓ existing · type to search "
+    } else {
+        " Emoji — type to search "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta))
-        .title(" Emoji — type to search ");
+        .title(title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -89,6 +96,25 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
             if *is_custom && !selected {
                 spans.push(Span::styled("[custom]", Style::default().fg(Color::Blue)));
+            }
+
+            if let Some((_, user_reacted)) = state.emoji_picker_message_reactions
+                .iter()
+                .find(|(n, _)| n == name)
+            {
+                if *user_reacted {
+                    spans.push(Span::styled(" ✓ added", if selected {
+                        style
+                    } else {
+                        Style::default().fg(Color::Green)
+                    }));
+                } else {
+                    spans.push(Span::styled(" on message", if selected {
+                        style
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    }));
+                }
             }
 
             ListItem::new(Line::from(spans))

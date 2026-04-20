@@ -51,6 +51,7 @@ pub enum Event {
         height: u32,
     },
     CustomEmojiLoaded(std::collections::HashMap<String, String>),
+    StandardEmojiLoaded(std::collections::HashMap<String, String>),
     ChannelSectionsLoaded(Vec<crate::slack::types::ChannelSection>),
     CustomEmojiImageLoaded {
         name: String,
@@ -69,6 +70,10 @@ pub enum Event {
     },
     AvatarImageFailed {
         user_id: String,
+    },
+    FileUploaded {
+        channel_id: String,
+        filename: String,
     },
     ApiError(String),
     SearchResultsLoaded {
