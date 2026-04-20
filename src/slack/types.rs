@@ -379,3 +379,42 @@ pub struct WsPresenceChange {
     pub user: Option<UserId>,
     pub presence: Option<String>,
 }
+
+// === search.messages ===
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SearchMessagesData {
+    #[serde(default)]
+    pub messages: SearchMessages,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SearchMessages {
+    #[serde(default)]
+    pub matches: Vec<SearchMatch>,
+    pub paging: Option<SearchPaging>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchMatch {
+    pub text: String,
+    pub ts: Timestamp,
+    pub user: Option<UserId>,
+    pub username: Option<String>,
+    pub channel: Option<SearchChannel>,
+    pub permalink: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchChannel {
+    pub id: ChannelId,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchPaging {
+    pub count: Option<u32>,
+    pub total: Option<u32>,
+    pub page: Option<u32>,
+    pub pages: Option<u32>,
+}

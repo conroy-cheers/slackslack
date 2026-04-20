@@ -44,6 +44,12 @@ pub trait SlackApi: Clone + Send + Sync + 'static {
         &self,
         url: &str,
     ) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
+    fn search_messages(
+        &self,
+        query: &str,
+        page: u32,
+        count: u32,
+    ) -> impl std::future::Future<Output = Result<SearchMessagesData>> + Send;
 }
 
 #[derive(Clone)]
@@ -271,6 +277,27 @@ impl SlackClient {
         self.post("users.channelSections.list", &[]).await
     }
 
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        page: u32,
+        count: u32,
+    ) -> Result<SearchMessagesData> {
+        let page_str = page.to_string();
+        let count_str = count.to_string();
+        self.post(
+            "search.messages",
+            &[
+                ("query", query),
+                ("page", &page_str),
+                ("count", &count_str),
+                ("sort", "timestamp"),
+                ("sort_dir", "desc"),
+            ],
+        )
+        .await
+    }
+
     /// Download a file from a Slack private URL (uses cookie auth).
     pub async fn download_file_raw(&self, url: &str) -> Result<Vec<u8>> {
         let resp = self.http.get(url).send().await?;
@@ -335,5 +362,14 @@ impl SlackApi for SlackClient {
 
     async fn download_file(&self, url: &str) -> Result<Vec<u8>> {
         self.download_file_raw(url).await
+    }
+
+    async fn search_messages(
+        &self,
+        query: &str,
+        page: u32,
+        count: u32,
+    ) -> Result<SearchMessagesData> {
+        self.search_messages(query, page, count).await
     }
 }

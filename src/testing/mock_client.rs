@@ -36,6 +36,9 @@ pub enum ApiCall {
     DownloadFile {
         url: String,
     },
+    SearchMessages {
+        query: String,
+    },
 }
 
 #[derive(Clone)]
@@ -211,5 +214,17 @@ impl SlackApi for MockSlackClient {
             url: url.to_string(),
         });
         async { Ok(Vec::new()) }
+    }
+
+    fn search_messages(
+        &self,
+        query: &str,
+        _page: u32,
+        _count: u32,
+    ) -> impl std::future::Future<Output = Result<SearchMessagesData>> + Send {
+        self.record(ApiCall::SearchMessages {
+            query: query.to_string(),
+        });
+        async { Ok(SearchMessagesData::default()) }
     }
 }

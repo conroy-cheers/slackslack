@@ -1,6 +1,7 @@
 mod channels;
 pub mod emoji;
 mod emoji_picker;
+mod global_search;
 mod help;
 pub mod images;
 mod input;
@@ -131,7 +132,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
                 frame.set_cursor_position((x, y));
             }
         }
-        InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker => {}
+        InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker | InputMode::GlobalSearch => {}
     }
 
     // Help overlay (rendered last so it's on top)
@@ -150,6 +151,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     if state.input_mode == InputMode::UserPicker {
         user_picker::render(frame, state);
         state.occlusion_rects.push(user_picker::overlay_rect(frame.area()));
+    }
+
+    // Global search overlay
+    if state.input_mode == InputMode::GlobalSearch {
+        global_search::render(frame, state);
+        state.occlusion_rects.push(global_search::overlay_rect(frame.area()));
     }
 
 }

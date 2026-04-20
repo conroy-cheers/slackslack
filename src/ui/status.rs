@@ -14,6 +14,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         InputMode::Reaction => " REACT ",
         InputMode::EmojiPicker => " EMOJI ",
         InputMode::UserPicker => " @USER ",
+        InputMode::GlobalSearch => " SEARCH ",
     };
     let mode_style = match state.input_mode {
         InputMode::Normal => Style::default()
@@ -24,7 +25,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             .fg(Color::Black)
             .bg(Color::Green)
             .add_modifier(Modifier::BOLD),
-        InputMode::Search | InputMode::MessageSearch => Style::default()
+        InputMode::Search | InputMode::MessageSearch | InputMode::GlobalSearch => Style::default()
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD),

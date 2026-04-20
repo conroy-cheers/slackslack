@@ -71,6 +71,11 @@ pub enum Event {
         user_id: String,
     },
     ApiError(String),
+    SearchResultsLoaded {
+        query: String,
+        matches: Vec<crate::slack::types::SearchMatch>,
+        total: u32,
+    },
 
     // Internal
     Tick,
