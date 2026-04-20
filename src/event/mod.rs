@@ -8,6 +8,7 @@ pub enum Event {
     // Terminal
     Key(KeyEvent),
     Resize(u16, u16),
+    Mouse(crossterm::event::MouseEvent),
 
     // Slack real-time
     SlackConnected { self_id: String, team: String },
@@ -59,6 +60,15 @@ pub enum Event {
     },
     CustomEmojiImageFailed {
         name: String,
+    },
+    AvatarImageLoaded {
+        user_id: String,
+        png_data: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    AvatarImageFailed {
+        user_id: String,
     },
     ApiError(String),
 

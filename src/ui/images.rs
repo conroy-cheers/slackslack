@@ -5,6 +5,7 @@
 
 use crate::state::{AppState, CachedImage};
 use base64::Engine;
+use ratatui::layout::Rect;
 use std::io::Write;
 
 const CHUNK_SIZE: usize = 4096;
@@ -50,9 +51,16 @@ fn render_inline_emoji(
     state: &AppState,
 ) -> std::io::Result<()> {
     for p in &state.inline_emoji_placements {
-        let cached = match state.custom_emoji_images.get(&p.emoji_key) {
-            Some(c) => c,
-            None => continue,
+        let cached = if let Some(uid) = p.emoji_key.strip_prefix("avatar:") {
+            match state.avatar_images.get(uid) {
+                Some(c) => c,
+                None => continue,
+            }
+        } else {
+            match state.custom_emoji_images.get(&p.emoji_key) {
+                Some(c) => c,
+                None => continue,
+            }
         };
         display_image(
             writer,
@@ -101,6 +109,10 @@ fn render_placements(
             continue;
         }
 
+        if is_occluded(screen_row, screen_col, display_rows, placement.display_cols, &state.occlusion_rects) {
+            continue;
+        }
+
         display_image(
             writer,
             screen_row,
@@ -111,6 +123,19 @@ fn render_placements(
         )?;
     }
     Ok(())
+}
+
+fn is_occluded(row: u16, col: u16, rows: u16, cols: u16, rects: &[Rect]) -> bool {
+    for r in rects {
+        if col < r.x + r.width
+            && col + cols > r.x
+            && row < r.y + r.height
+            && row + rows > r.y
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Display a single image at the given screen position using kitty protocol.
@@ -516,5 +541,88 @@ mod tests {
 
         let rows = extract_kitty_rows(&buf);
         assert_eq!(rows[0], 3, "image should not be clipped at offset 5 of 20");
+    }
+
+    #[test]
+    fn is_occluded_no_rects() {
+        assert!(!is_occluded(5, 5, 3, 10, &[]));
+    }
+
+    #[test]
+    fn is_occluded_full_overlap() {
+        let rects = vec![Rect::new(0, 0, 80, 40)];
+        assert!(is_occluded(5, 5, 3, 10, &rects));
+    }
+
+    #[test]
+    fn is_occluded_partial_overlap() {
+        let rects = vec![Rect::new(10, 10, 20, 20)];
+        // Image at (5, 8) with 3 rows, 10 cols → extends to (8, 18), overlaps rect starting at (10, 10)
+        assert!(is_occluded(5, 8, 6, 10, &rects));
+    }
+
+    #[test]
+    fn is_occluded_no_overlap() {
+        let rects = vec![Rect::new(50, 50, 20, 20)];
+        assert!(!is_occluded(5, 5, 3, 10, &rects));
+    }
+
+    #[test]
+    fn is_occluded_adjacent_not_overlapping() {
+        // Rect ends exactly where image starts
+        let rects = vec![Rect::new(0, 0, 10, 10)];
+        assert!(!is_occluded(10, 10, 3, 5, &rects));
+    }
+
+    #[test]
+    fn occluded_image_not_rendered() {
+        let info = MessagesRenderInfo {
+            inner_x: 0,
+            inner_y: 0,
+            inner_height: 40,
+            scroll_y: 0,
+        };
+        let placements = vec![ImagePlacement {
+            url: "img".into(),
+            line: 5,
+            col: 5,
+            display_cols: 10,
+            display_rows: 3,
+        }];
+        let mut state = make_state(placements, info, &["img"]);
+        // Overlay covering the image area
+        state.occlusion_rects.push(Rect::new(0, 0, 40, 20));
+
+        let mut buf = Vec::new();
+        render_visible_images(&mut buf, &state).unwrap();
+
+        let positions = extract_cursor_positions(&buf);
+        assert_eq!(positions.len(), 0, "occluded image should not render");
+    }
+
+    #[test]
+    fn non_occluded_image_still_renders() {
+        let info = MessagesRenderInfo {
+            inner_x: 0,
+            inner_y: 0,
+            inner_height: 40,
+            scroll_y: 0,
+        };
+        let placements = vec![ImagePlacement {
+            url: "img".into(),
+            line: 5,
+            col: 5,
+            display_cols: 10,
+            display_rows: 3,
+        }];
+        let mut state = make_state(placements, info, &["img"]);
+        // Overlay in a different area
+        state.occlusion_rects.push(Rect::new(50, 50, 20, 20));
+
+        let mut buf = Vec::new();
+        render_visible_images(&mut buf, &state).unwrap();
+
+        let positions = extract_cursor_positions(&buf);
+        assert_eq!(positions.len(), 1, "non-occluded image should still render");
     }
 }

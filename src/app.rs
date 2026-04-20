@@ -59,11 +59,14 @@ impl App {
         // Install panic hook to restore terminal before printing panic
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
             ratatui::restore();
             original_hook(panic_info);
         }));
 
         let mut terminal = ratatui::init();
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+            .expect("Failed to enable mouse capture");
 
         // Spawn terminal input reader
         let input_tx = self.event_tx.clone();
@@ -78,6 +81,9 @@ impl App {
                     }
                     Some(Ok(ct_event::Event::Resize(w, h))) => {
                         let _ = input_tx.send(Event::Resize(w, h));
+                    }
+                    Some(Ok(ct_event::Event::Mouse(mouse))) => {
+                        let _ = input_tx.send(Event::Mouse(mouse));
                     }
                     Some(Err(e)) => {
                         error!("Terminal event error: {}", e);
@@ -122,12 +128,14 @@ impl App {
                     // Render immediately — don't wait for tick
                     Self::render_frame(&mut self.state, &mut terminal)?;
                     crate::event::handler::process_emoji_load_queue(&mut self.state, &self.client, &self.event_tx);
+                    crate::event::handler::process_avatar_load_queue(&mut self.state, &self.client, &self.event_tx);
                 }
                 _ = tick.tick() => {
                     // Periodic maintenance
                     self.state.expire_typing();
                     Self::render_frame(&mut self.state, &mut terminal)?;
                     crate::event::handler::process_emoji_load_queue(&mut self.state, &self.client, &self.event_tx);
+                    crate::event::handler::process_avatar_load_queue(&mut self.state, &self.client, &self.event_tx);
                 }
             }
         }
@@ -135,6 +143,7 @@ impl App {
         // Save cache on exit
         self.save_cache();
 
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
         Ok(())
     }
@@ -165,9 +174,7 @@ impl App {
             let mut buf: Vec<u8> = Vec::new();
 
             ui::images::clear_images(&mut buf)?;
-            if !state.show_help {
-                ui::images::render_visible_images(&mut buf, state)?;
-            }
+            ui::images::render_visible_images(&mut buf, state)?;
 
             if let Some(text) = state.clipboard_pending.take() {
                 let b64 = base64::Engine::encode(

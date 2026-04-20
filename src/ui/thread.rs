@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         return;
     }
 
-    let (lines, placements, emoji_needed) = build_thread_lines(state, width);
+    let (lines, placements, emoji_needed, avatars) = build_thread_lines(state, width);
     let total_lines = lines.len();
 
     state.thread_max_scroll_offset = total_lines.saturating_sub(height);
@@ -54,6 +54,27 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         scroll_y,
     });
     state.emoji_load_queue.extend(emoji_needed);
+
+    // Convert avatar virtual line placements to screen coordinates
+    let visible_end = scroll_y + inner.height as usize;
+    for (user_id, vline) in &avatars {
+        if *vline < scroll_y || *vline >= visible_end {
+            continue;
+        }
+        let screen_row = inner.y + (*vline - scroll_y) as u16;
+        let screen_col = inner.x;
+        if state.avatar_images.contains_key(user_id.as_str()) {
+            state.inline_emoji_placements.push(crate::state::InlineEmojiPlacement {
+                emoji_key: format!("avatar:{}", user_id),
+                screen_row,
+                screen_col,
+                display_cols: 2,
+                display_rows: 1,
+            });
+        } else {
+            state.request_avatar(user_id);
+        }
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -81,7 +102,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 fn build_thread_lines(
     state: &AppState,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<String>) {
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<String>, Vec<(String, usize)>) {
     let msgs = match state.thread_messages() {
         Some(msgs) if !msgs.is_empty() => msgs,
         _ => {
@@ -92,6 +113,7 @@ fn build_thread_lines(
                 ))],
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             );
         }
     };
@@ -99,16 +121,20 @@ fn build_thread_lines(
     let mut result = Vec::new();
     let mut placements = Vec::new();
     let mut emoji_needed = Vec::new();
+    let mut avatars: Vec<(String, usize)> = Vec::new();
     let msg_count = msgs.len();
 
     for (i, msg) in msgs.iter().enumerate() {
+        if let Some(uid) = &msg.user {
+            avatars.push((uid.clone(), result.len()));
+        }
         render_thread_message(msg, state, width, i == 0, &mut result, &mut placements, &mut emoji_needed);
         if i + 1 < msg_count {
             result.push(Line::from(""));
         }
     }
 
-    (result, placements, emoji_needed)
+    (result, placements, emoji_needed, avatars)
 }
 
 fn render_thread_message(
@@ -129,17 +155,21 @@ fn render_thread_message(
 
     let time = format_timestamp(&msg.ts);
 
+    let name_color = msg.user.as_ref()
+        .map(|uid| state.user_color(uid))
+        .unwrap_or(Color::Green);
     let name_style = if is_parent {
         Style::default()
-            .fg(Color::Green)
+            .fg(name_color)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         Style::default()
-            .fg(Color::Green)
+            .fg(name_color)
             .add_modifier(Modifier::BOLD)
     };
 
     let header_spans: Vec<Span<'static>> = vec![
+        Span::styled("  ".to_string(), Style::default()), // avatar placeholder
         Span::styled(username, name_style),
         Span::styled("  ", Style::default()),
         Span::styled(time, Style::default().fg(Color::DarkGray)),

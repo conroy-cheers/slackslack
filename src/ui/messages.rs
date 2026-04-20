@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     // Build all lines as owned data (Line<'static>) so we don't borrow state
     let msg_count = state.message_count();
     let selected_idx = msg_count.saturating_sub(1).saturating_sub(state.selected_message_idx);
-    let (lines, placements, msg_line_starts, emoji_needed) = build_lines(state, width, selected_idx);
+    let (lines, placements, msg_line_starts, emoji_needed, avatars) = build_lines(state, width, selected_idx);
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(height);
 
@@ -86,6 +86,28 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         scroll_y,
     });
 
+    // Convert avatar virtual line placements to screen coordinates
+    let visible_end = scroll_y + inner.height as usize;
+    for (user_id, vline) in &avatars {
+        if *vline < scroll_y || *vline >= visible_end {
+            continue;
+        }
+        let screen_row = inner.y + (*vline - scroll_y) as u16;
+        // col 1 = after the marker character
+        let screen_col = inner.x + 1;
+        if state.avatar_images.contains_key(user_id.as_str()) {
+            state.inline_emoji_placements.push(crate::state::InlineEmojiPlacement {
+                emoji_key: format!("avatar:{}", user_id),
+                screen_row,
+                screen_col,
+                display_cols: 2,
+                display_rows: 1,
+            });
+        } else {
+            state.request_avatar(user_id);
+        }
+    }
+
     let paragraph = Paragraph::new(lines)
         .block(block)
         .scroll((scroll_y as u16, 0));
@@ -114,12 +136,13 @@ fn build_lines(
     state: &AppState,
     width: usize,
     selected_idx: usize,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>, Vec<String>) {
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>, Vec<String>, Vec<(String, usize)>) {
     let messages = state.channel_messages();
 
     let mut placements = Vec::new();
     let mut msg_line_starts = Vec::new();
     let mut emoji_needed = Vec::new();
+    let mut avatars: Vec<(String, usize)> = Vec::new();
 
     let mut result = match messages {
         Some(msgs) if !msgs.is_empty() => {
@@ -127,6 +150,9 @@ fn build_lines(
             let msg_count = msgs.len();
             for (i, msg) in msgs.iter().enumerate() {
                 msg_line_starts.push(lines.len());
+                if let Some(uid) = &msg.user {
+                    avatars.push((uid.clone(), lines.len()));
+                }
                 let is_selected = i == selected_idx;
                 let is_search_match = state.message_search_active
                     && state.message_search_results_set.contains(&i);
@@ -170,7 +196,7 @@ fn build_lines(
         )));
     }
 
-    (result, placements, msg_line_starts, emoji_needed)
+    (result, placements, msg_line_starts, emoji_needed, avatars)
 }
 
 fn render_message(
@@ -208,13 +234,17 @@ fn render_message(
         Style::default()
     };
 
-    // Header: "▎username  HH:MM"
+    // Header: "▎ [avatar] username  HH:MM"
+    let name_color = msg.user.as_ref()
+        .map(|uid| state.user_color(uid))
+        .unwrap_or(Color::Green);
     let mut header_spans: Vec<Span<'static>> = vec![
         Span::styled(marker.to_string(), marker_style),
+        Span::styled("  ".to_string(), Style::default()), // avatar placeholder
         Span::styled(
             username,
             Style::default()
-                .fg(Color::Green)
+                .fg(name_color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
@@ -882,7 +912,7 @@ mod tests {
         ];
         let state = state_with(messages, &["http://img1", "http://img2"]);
 
-        let (lines, placements, starts, _) = build_lines(&state, 80, 3);
+        let (lines, placements, starts, _, _) = build_lines(&state, 80, 3);
 
         for p in &placements {
             assert!(
@@ -933,7 +963,7 @@ mod tests {
         let state = state_with(messages, &refs);
 
         for sel_idx in 0..20 {
-            let (lines, placements, starts, _) = build_lines(&state, 80, sel_idx);
+            let (lines, placements, starts, _, _) = build_lines(&state, 80, sel_idx);
 
             for p in &placements {
                 assert!(
@@ -954,7 +984,7 @@ mod tests {
     #[test]
     fn empty_channel_no_placements() {
         let state = state_with(vec![], &[]);
-        let (lines, placements, starts, _) = build_lines(&state, 80, 0);
+        let (lines, placements, starts, _, _) = build_lines(&state, 80, 0);
 
         assert!(placements.is_empty());
         assert!(starts.is_empty());
@@ -967,7 +997,7 @@ mod tests {
         let messages = vec![msg_with_image("hi", "1000.0", "http://not_cached")];
         let state = state_with(messages, &[]); // no cached URLs
 
-        let (_, placements, _, _) = build_lines(&state, 80, 0);
+        let (_, placements, _, _, _) = build_lines(&state, 80, 0);
         assert!(placements.is_empty());
     }
 
@@ -981,7 +1011,7 @@ mod tests {
         let state = state_with(messages, &["http://img"]);
 
         for width in [1, 5, 20, 80, 200, 400] {
-            let (lines, placements, starts, _) = build_lines(&state, width, 1);
+            let (lines, placements, starts, _, _) = build_lines(&state, width, 1);
 
             for p in &placements {
                 assert!(

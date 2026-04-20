@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             Style::default().fg(Color::Yellow),
             Color::Magenta,
         ),
-        InputMode::EmojiPicker | InputMode::MessageSearch | InputMode::Search => (
+        InputMode::EmojiPicker | InputMode::UserPicker | InputMode::MessageSearch | InputMode::Search => (
             " i to type | / search | ? help ".to_string(),
             "",
             Style::default().fg(Color::DarkGray),

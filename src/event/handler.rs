@@ -127,6 +127,29 @@ pub fn handle_event<C: SlackApi>(
             state.pending_emoji_images.remove(&name);
             HandleResult::Continue
         }
+        Event::AvatarImageLoaded {
+            user_id,
+            png_data,
+            width,
+            height,
+        } => {
+            state.pending_avatar_images.remove(&user_id);
+            save_avatar_to_disk(&state.team_id, &user_id, &png_data);
+            state.avatar_images.insert(
+                user_id,
+                crate::state::CachedImage {
+                    png_data,
+                    width,
+                    height,
+                },
+            );
+            state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::AvatarImageFailed { user_id } => {
+            state.pending_avatar_images.remove(&user_id);
+            HandleResult::Continue
+        }
         Event::ApiError(err) => {
             state.last_error = Some(err);
             state.dirty = true;
@@ -138,6 +161,10 @@ pub fn handle_event<C: SlackApi>(
         }
         Event::Resize(_, _) => {
             state.dirty = true;
+            HandleResult::Continue
+        }
+        Event::Mouse(mouse) => {
+            handle_mouse_event(mouse, state, client, event_tx);
             HandleResult::Continue
         }
     }
@@ -168,6 +195,7 @@ fn handle_key<C: SlackApi>(
         InputMode::MessageSearch => handle_message_search_key(key, state),
         InputMode::Reaction => handle_reaction_key(key, state, client, event_tx),
         InputMode::EmojiPicker => handle_emoji_picker_key(key, state, client, event_tx),
+        InputMode::UserPicker => handle_user_picker_key(key, state),
     }
 }
 
@@ -412,12 +440,14 @@ fn handle_normal_messages<C: SlackApi>(
         }
         // Channel navigation from messages view
         KeyCode::Char(']') => {
+            state.close_thread();
             state.channel_next();
             state.selected_message_idx = 0;
             state.clear_message_search();
             ensure_history_loaded(state, client, event_tx);
         }
         KeyCode::Char('[') => {
+            state.close_thread();
             state.channel_prev();
             state.selected_message_idx = 0;
             state.clear_message_search();
@@ -425,6 +455,7 @@ fn handle_normal_messages<C: SlackApi>(
         }
         KeyCode::Char('}') => {
             if state.next_unread_channel() {
+                state.close_thread();
                 state.selected_message_idx = 0;
                 state.clear_message_search();
                 ensure_history_loaded(state, client, event_tx);
@@ -432,6 +463,7 @@ fn handle_normal_messages<C: SlackApi>(
         }
         KeyCode::Char('{') => {
             if state.prev_unread_channel() {
+                state.close_thread();
                 state.selected_message_idx = 0;
                 state.clear_message_search();
                 ensure_history_loaded(state, client, event_tx);
@@ -644,6 +676,10 @@ fn handle_insert_key<C: SlackApi>(
         KeyCode::Down => state.input_history_next(),
         KeyCode::Home => state.input_cursor = 0,
         KeyCode::End => state.input_cursor = state.input_text.len(),
+        KeyCode::Char('@') => {
+            state.open_user_picker();
+            return HandleResult::Continue;
+        }
         KeyCode::Char(c) => {
             state.input_text.insert(state.input_cursor, c);
             state.input_cursor += 1;
@@ -891,6 +927,185 @@ fn handle_emoji_picker_key<C: SlackApi>(
         _ => {}
     }
     HandleResult::Continue
+}
+
+// ── User picker ────────────────────────────────────────────────────────────
+
+fn handle_user_picker_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_text.insert(state.input_cursor, '@');
+            state.input_cursor += 1;
+            state.input_mode = InputMode::Insert;
+            state.focus = Focus::Input;
+        }
+        KeyCode::Enter => {
+            if let Some((user_id, _display)) = state
+                .user_picker_results
+                .get(state.user_picker_selected)
+                .cloned()
+            {
+                let insert = format!("<@{}>", user_id);
+                state.input_text.insert_str(state.input_cursor, &insert);
+                state.input_cursor += insert.len();
+            }
+            state.input_mode = InputMode::Insert;
+            state.focus = Focus::Input;
+        }
+        KeyCode::Backspace => {
+            if state.user_picker_query.is_empty() {
+                state.input_text.insert(state.input_cursor, '@');
+                state.input_cursor += 1;
+                state.input_mode = InputMode::Insert;
+                state.focus = Focus::Input;
+            } else {
+                state.user_picker_query.pop();
+                state.filter_user_picker();
+            }
+        }
+        KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !state.user_picker_results.is_empty() {
+                state.user_picker_selected =
+                    (state.user_picker_selected + 1) % state.user_picker_results.len();
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if !state.user_picker_results.is_empty() {
+                if state.user_picker_selected == 0 {
+                    state.user_picker_selected = state.user_picker_results.len() - 1;
+                } else {
+                    state.user_picker_selected -= 1;
+                }
+            }
+        }
+        KeyCode::PageDown => {
+            let page = 15;
+            if !state.user_picker_results.is_empty() {
+                state.user_picker_selected = (state.user_picker_selected + page)
+                    .min(state.user_picker_results.len() - 1);
+            }
+        }
+        KeyCode::PageUp => {
+            let page = 15;
+            state.user_picker_selected = state.user_picker_selected.saturating_sub(page);
+        }
+        KeyCode::Tab => {
+            if !state.user_picker_results.is_empty() {
+                state.user_picker_selected =
+                    (state.user_picker_selected + 1) % state.user_picker_results.len();
+            }
+        }
+        KeyCode::BackTab => {
+            if !state.user_picker_results.is_empty() {
+                if state.user_picker_selected == 0 {
+                    state.user_picker_selected = state.user_picker_results.len() - 1;
+                } else {
+                    state.user_picker_selected -= 1;
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            state.user_picker_query.push(c);
+            state.filter_user_picker();
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Mouse ──────────────────────────────────────────────────────────────────
+
+fn handle_mouse_event<C: SlackApi>(
+    mouse: crossterm::event::MouseEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    use crossterm::event::MouseEventKind;
+    use ratatui::layout::Rect;
+
+    fn contains(r: Rect, col: u16, row: u16) -> bool {
+        col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+    }
+
+    let col = mouse.column;
+    let row = mouse.row;
+    let scroll_lines: usize = 3;
+
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if contains(state.channel_list_area, col, row) {
+                state.channel_prev();
+            } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
+                state.thread_scroll_offset = (state.thread_scroll_offset + scroll_lines)
+                    .min(state.thread_max_scroll_offset);
+            } else if contains(state.messages_area, col, row) {
+                state.message_select_page(-1);
+            }
+            state.dirty = true;
+        }
+        MouseEventKind::ScrollDown => {
+            if contains(state.channel_list_area, col, row) {
+                state.channel_next();
+            } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
+                state.thread_scroll_offset = state.thread_scroll_offset.saturating_sub(scroll_lines);
+            } else if contains(state.messages_area, col, row) {
+                state.message_select_page(1);
+            }
+            state.dirty = true;
+        }
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            if contains(state.channel_list_area, col, row) {
+                // Click on channel list: select channel, open messages
+                let inner_row = (row - state.channel_list_area.y).saturating_sub(1) as usize;
+                let visual_idx = state.channel_list_offset + inner_row;
+                if let Some(entry) = state.channel_list_items.get(visual_idx).cloned() {
+                    match entry {
+                        crate::state::ChannelListEntry::Channel(ch_idx) => {
+                            state.selected_channel_idx = ch_idx;
+                            state.selected_message_idx = 0;
+                            state.focus = Focus::Messages;
+                            state.input_mode = InputMode::Normal;
+                            ensure_history_loaded(state, client, event_tx);
+                        }
+                        crate::state::ChannelListEntry::SectionHeader(id) => {
+                            state.toggle_section_collapse(&id);
+                        }
+                        crate::state::ChannelListEntry::DmMore => {
+                            state.dm_list_expanded = !state.dm_list_expanded;
+                        }
+                        _ => {}
+                    }
+                }
+                state.dirty = true;
+            } else if contains(state.messages_area, col, row) {
+                // Click on messages: select the clicked message
+                if let Some(info) = &state.messages_render_info {
+                    let click_row = (row - info.inner_y) as usize;
+                    let vline = info.scroll_y + click_row;
+                    // Find which message this line belongs to
+                    let msg_count = state.message_count();
+                    if msg_count > 0 && !state.message_line_starts.is_empty() {
+                        let msg_idx = match state.message_line_starts.binary_search(&vline) {
+                            Ok(i) => i,
+                            Err(i) => i.saturating_sub(1),
+                        };
+                        if msg_idx < msg_count {
+                            state.selected_message_idx =
+                                msg_count.saturating_sub(1).saturating_sub(msg_idx);
+                            state.focus = Focus::Messages;
+                        }
+                    }
+                }
+                state.dirty = true;
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1314,6 +1529,101 @@ pub fn process_emoji_load_queue<C: SlackApi>(
         state.pending_emoji_images.insert(key.clone());
         spawn_download_emoji_image(client, &key, &url, event_tx);
     }
+}
+
+pub fn process_avatar_load_queue<C: SlackApi>(
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let queue: Vec<String> = state.avatar_load_queue.drain(..).collect();
+    for user_id in queue {
+        if state.avatar_images.contains_key(&user_id)
+            || state.pending_avatar_images.contains(&user_id)
+        {
+            continue;
+        }
+        if let Some(img) = load_avatar_from_disk(&state.team_id, &user_id) {
+            state.avatar_images.insert(user_id, img);
+            state.dirty = true;
+            continue;
+        }
+        let url = match state.avatar_url(&user_id) {
+            Some(url) => url.to_string(),
+            None => continue,
+        };
+        state.pending_avatar_images.insert(user_id.clone());
+        spawn_download_avatar(client, &user_id, &url, event_tx);
+    }
+}
+
+fn avatar_cache_dir(team_id: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(format!(
+        "{}/.cache/slackslack/{}/avatars",
+        home, team_id
+    ))
+}
+
+fn save_avatar_to_disk(team_id: &str, user_id: &str, png_data: &[u8]) {
+    if team_id.is_empty() {
+        return;
+    }
+    let dir = avatar_cache_dir(team_id);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        error!("Failed to create avatar cache dir: {}", e);
+        return;
+    }
+    let path = dir.join(format!("{}.png", user_id));
+    if let Err(e) = std::fs::write(&path, png_data) {
+        error!("Failed to write avatar cache {}: {}", path.display(), e);
+    }
+}
+
+fn load_avatar_from_disk(team_id: &str, user_id: &str) -> Option<crate::state::CachedImage> {
+    if team_id.is_empty() {
+        return None;
+    }
+    let path = avatar_cache_dir(team_id).join(format!("{}.png", user_id));
+    let data = std::fs::read(&path).ok()?;
+    let (width, height) = read_png_dimensions(&data)?;
+    Some(crate::state::CachedImage {
+        png_data: data,
+        width,
+        height,
+    })
+}
+
+fn spawn_download_avatar<C: SlackApi>(
+    client: &C,
+    user_id: &str,
+    url: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let user_id = user_id.to_string();
+    let url = url.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client.download_file(&url).await {
+            Ok(data) => {
+                if let Some((png_data, width, height)) = crate::ui::images::encode_as_png(&data) {
+                    let _ = tx.send(Event::AvatarImageLoaded {
+                        user_id,
+                        png_data,
+                        width,
+                        height,
+                    });
+                } else {
+                    let _ = tx.send(Event::AvatarImageFailed { user_id });
+                }
+            }
+            Err(e) => {
+                error!("Failed to download avatar {}: {}", user_id, e);
+                let _ = tx.send(Event::AvatarImageFailed { user_id });
+            }
+        }
+    });
 }
 
 fn emoji_cache_dir(team_id: &str) -> std::path::PathBuf {

@@ -11,8 +11,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
-        .title(" Emoji — type to search ");
+        .border_style(Style::default().fg(Color::Blue))
+        .title(" @mention — type to search ");
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -21,7 +21,6 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         return;
     }
 
-    // Split inner into search line + results list
     let chunks = Layout::vertical([
         Constraint::Length(1), // search input
         Constraint::Length(1), // separator
@@ -31,16 +30,16 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     // Search input
     let search_line = Line::from(vec![
-        Span::styled(" /", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(" @", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(
-            state.emoji_picker_query.clone(),
+            state.user_picker_query.clone(),
             Style::default().fg(Color::White),
         ),
         Span::styled(
-            if state.emoji_picker_results.is_empty() && !state.emoji_picker_query.is_empty() {
+            if state.user_picker_results.is_empty() && !state.user_picker_query.is_empty() {
                 " (no matches)".to_string()
-            } else if !state.emoji_picker_results.is_empty() {
-                format!(" [{}/{}]", state.emoji_picker_selected + 1, state.emoji_picker_results.len())
+            } else if !state.user_picker_results.is_empty() {
+                format!(" [{}/{}]", state.user_picker_selected + 1, state.user_picker_results.len())
             } else {
                 String::new()
             },
@@ -61,79 +60,43 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let max_visible = results_area.height as usize;
 
     let items: Vec<ListItem> = state
-        .emoji_picker_results
+        .user_picker_results
         .iter()
         .enumerate()
-        .map(|(i, (name, display, is_custom))| {
-            let selected = i == state.emoji_picker_selected;
+        .map(|(i, (_user_id, display_name))| {
+            let selected = i == state.user_picker_selected;
             let style = if selected {
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
 
-            let emoji_display = if *is_custom {
-                if state.has_emoji_image(name) {
-                    "  ".to_string()
-                } else {
-                    display.clone()
-                }
-            } else {
-                display.clone()
-            };
-
-            let mut spans = vec![
-                Span::styled(format!(" {} ", emoji_display), style),
-                Span::styled(format!(":{}: ", name), if selected { style } else { Style::default().fg(Color::DarkGray) }),
-            ];
-
-            if *is_custom && !selected {
-                spans.push(Span::styled("[custom]", Style::default().fg(Color::Blue)));
-            }
-
-            ListItem::new(Line::from(spans))
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", display_name), style),
+            ]))
         })
         .collect();
 
     let item_count = items.len();
     let mut list_state = ListState::default();
-    list_state.select(Some(state.emoji_picker_selected));
+    list_state.select(Some(state.user_picker_selected));
 
     let list = List::new(items);
     frame.render_stateful_widget(list, results_area, &mut list_state);
 
-    // Use ratatui's actual scroll offset for correct image placement
-    let scroll_offset = list_state.offset();
-
-    // Place inline emoji images for visible custom emoji
-    let visible_names: Vec<(usize, String)> = state
-        .emoji_picker_results
-        .iter()
-        .enumerate()
-        .filter(|(i, (_, _, is_custom))| {
-            *is_custom && *i >= scroll_offset && *i < scroll_offset + max_visible
-        })
-        .map(|(i, (name, _, _))| (i, name.clone()))
-        .collect();
-
-    for (i, name) in visible_names {
-        let row_in_list = (i - scroll_offset) as u16;
-        state.place_inline_emoji(&name, results_area.y + row_in_list, results_area.x + 1);
-    }
-
-    // Scrollbar for results
+    // Scrollbar
     if item_count > max_visible {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .thumb_style(Style::default().fg(Color::Magenta))
+            .thumb_style(Style::default().fg(Color::Blue))
             .track_style(Style::default().fg(Color::DarkGray));
-        let mut scrollbar_state = ScrollbarState::new(item_count).position(state.emoji_picker_selected);
+        let mut scrollbar_state = ScrollbarState::new(item_count).position(state.user_picker_selected);
         frame.render_stateful_widget(scrollbar, results_area, &mut scrollbar_state);
     }
 
     // Set cursor position for search input
-    let cursor_x = chunks[0].x + 2 + state.emoji_picker_query.len() as u16;
+    let cursor_x = chunks[0].x + 2 + state.user_picker_query.len() as u16;
     let cursor_y = chunks[0].y;
     frame.set_cursor_position((cursor_x, cursor_y));
 }

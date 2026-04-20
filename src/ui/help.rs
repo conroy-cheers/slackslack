@@ -99,6 +99,10 @@ pub fn render(frame: &mut Frame) {
     frame.render_widget(paragraph, area);
 }
 
+pub fn overlay_rect(area: Rect) -> Rect {
+    centered_rect(60, 80, area)
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
     let horizontal = Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);

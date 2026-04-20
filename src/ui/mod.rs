@@ -7,6 +7,7 @@ mod input;
 pub mod messages;
 mod status;
 mod thread;
+mod user_picker;
 
 use crate::state::{AppState, InputMode};
 use ratatui::Frame;
@@ -17,6 +18,7 @@ use ratatui::widgets::Paragraph;
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
     state.inline_emoji_placements.clear();
+    state.occlusion_rects.clear();
     let size = frame.area();
 
     // Outer layout: main area + status bar (full width at very bottom)
@@ -85,14 +87,22 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             ])
             .split(messages_area);
 
+        state.messages_area = msg_thread_chunks[0];
+        state.thread_area = Some(msg_thread_chunks[1]);
+
         channels::render(frame, state, main_chunks[0]);
         messages::render(frame, state, msg_thread_chunks[0]);
         thread::render(frame, state, msg_thread_chunks[1]);
     } else {
+        state.messages_area = messages_area;
+        state.thread_area = None;
+
         channels::render(frame, state, main_chunks[0]);
         messages::render(frame, state, messages_area);
     }
 
+    state.channel_list_area = main_chunks[0];
+    state.input_area = input_area;
     input::render(frame, state, input_area);
     status::render(frame, state, outer[1]);
 
@@ -121,17 +131,25 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
                 frame.set_cursor_position((x, y));
             }
         }
-        InputMode::Normal | InputMode::EmojiPicker => {}
+        InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker => {}
     }
 
     // Help overlay (rendered last so it's on top)
     if state.show_help {
         help::render(frame);
+        state.occlusion_rects.push(help::overlay_rect(frame.area()));
     }
 
     // Emoji picker overlay (on top of everything)
     if state.input_mode == InputMode::EmojiPicker {
         emoji_picker::render(frame, state);
+        state.occlusion_rects.push(emoji_picker::overlay_rect(frame.area()));
+    }
+
+    // User picker overlay (on top of everything)
+    if state.input_mode == InputMode::UserPicker {
+        user_picker::render(frame, state);
+        state.occlusion_rects.push(user_picker::overlay_rect(frame.area()));
     }
 
 }

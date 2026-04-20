@@ -129,10 +129,32 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         .position(|entry| matches!(entry, ChannelListEntry::Channel(idx) if *idx == state.selected_channel_idx))
         .unwrap_or(0);
 
+    // Adjust scroll offset so viewport only moves when selection enters top/bottom quarter
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if inner_height > 0 && items_len > 0 {
+        let quarter = inner_height / 4;
+        let top_edge = state.channel_list_offset + quarter;
+        let bottom_edge = state.channel_list_offset + inner_height.saturating_sub(quarter.max(1));
+        if visual_idx < top_edge {
+            state.channel_list_offset = visual_idx.saturating_sub(quarter);
+        } else if visual_idx >= bottom_edge {
+            state.channel_list_offset = (visual_idx + quarter.max(1))
+                .saturating_sub(inner_height)
+                .min(items_len.saturating_sub(inner_height));
+        }
+        state.channel_list_offset = state
+            .channel_list_offset
+            .min(items_len.saturating_sub(inner_height));
+    }
+
     let mut list_state = ListState::default();
     list_state.select(Some(visual_idx));
+    *list_state.offset_mut() = state.channel_list_offset;
 
     frame.render_stateful_widget(list, area, &mut list_state);
+
+    // Persist ratatui's computed offset back (it may clamp)
+    state.channel_list_offset = list_state.offset();
 
     // Scrollbar
     if items_len > 0 {

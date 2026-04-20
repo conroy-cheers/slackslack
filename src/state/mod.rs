@@ -1,6 +1,7 @@
 pub mod cache;
 
 use crate::slack::types::{Channel, Message, User};
+use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -43,7 +44,8 @@ impl ChannelData {
             }
         }
 
-        if !self.messages.iter().any(|m| m.ts == msg.ts) {
+        let is_thread_reply = msg.thread_ts.as_ref().is_some_and(|pts| pts != &msg.ts);
+        if !is_thread_reply && !self.messages.iter().any(|m| m.ts == msg.ts) {
             self.messages.push_back(msg);
         }
 
@@ -185,12 +187,18 @@ pub struct AppState {
     pub thread_placements: Vec<ImagePlacement>,
     pub thread_render_info: Option<ThreadRenderInfo>,
     pub inline_emoji_placements: Vec<InlineEmojiPlacement>,
+    pub occlusion_rects: Vec<Rect>,
 
     // Custom emoji
     pub custom_emoji: HashMap<String, String>, // name -> resolved URL or "alias:other"
     pub custom_emoji_images: HashMap<String, CachedImage>,
     pub pending_emoji_images: HashSet<String>,
     pub emoji_load_queue: Vec<String>,
+
+    // User avatars (kitty protocol)
+    pub avatar_images: HashMap<String, CachedImage>,
+    pub pending_avatar_images: HashSet<String>,
+    pub avatar_load_queue: Vec<String>,
 
     // Channel sections
     pub channel_sections: Vec<crate::slack::types::ChannelSection>,
@@ -203,11 +211,23 @@ pub struct AppState {
     pub emoji_picker_results: Vec<(String, String, bool)>, // (name, display, is_custom)
     pub emoji_picker_source: EmojiPickerSource,
 
+    // User picker
+    pub user_picker_query: String,
+    pub user_picker_selected: usize,
+    pub user_picker_results: Vec<(String, String)>, // (user_id, display_name)
+
     // Channel list visual map (populated during render, read by event handler)
     pub channel_list_items: Vec<ChannelListEntry>,
+    pub channel_list_offset: usize,
 
     // Channel sort
     pub channels_need_resort: bool,
+
+    // Pane areas for mouse hit testing (set during render)
+    pub channel_list_area: Rect,
+    pub messages_area: Rect,
+    pub thread_area: Option<Rect>,
+    pub input_area: Rect,
 
     // Performance overlay
     pub show_fps: bool,
@@ -281,6 +301,7 @@ pub enum InputMode {
     MessageSearch, // message content search
     Reaction,
     EmojiPicker,
+    UserPicker,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -342,10 +363,14 @@ impl AppState {
             thread_placements: Vec::new(),
             thread_render_info: None,
             inline_emoji_placements: Vec::new(),
+            occlusion_rects: Vec::new(),
             custom_emoji: HashMap::new(),
             custom_emoji_images: HashMap::new(),
             pending_emoji_images: HashSet::new(),
             emoji_load_queue: Vec::new(),
+            avatar_images: HashMap::new(),
+            pending_avatar_images: HashSet::new(),
+            avatar_load_queue: Vec::new(),
             channel_sections: Vec::new(),
             collapsed_sections: HashSet::new(),
             dm_list_expanded: false,
@@ -353,8 +378,16 @@ impl AppState {
             emoji_picker_selected: 0,
             emoji_picker_results: Vec::new(),
             emoji_picker_source: EmojiPickerSource::Reaction,
+            user_picker_query: String::new(),
+            user_picker_selected: 0,
+            user_picker_results: Vec::new(),
             channel_list_items: Vec::new(),
+            channel_list_offset: 0,
             channels_need_resort: false,
+            channel_list_area: Rect::default(),
+            messages_area: Rect::default(),
+            thread_area: None,
+            input_area: Rect::default(),
             show_fps: false,
             last_frame_time: std::time::Duration::ZERO,
             frame_count: 0,
@@ -376,8 +409,14 @@ impl AppState {
     }
 
     pub fn set_channels(&mut self, mut channels: Vec<Channel>) {
+        let selected_id = self.active_channel_id();
         self.sort_channels(&mut channels);
         self.channels = channels;
+        if let Some(id) = selected_id {
+            if let Some(pos) = self.channels.iter().position(|c| c.id == id) {
+                self.selected_channel_idx = pos;
+            }
+        }
     }
 
     /// Sort channels: unread first, then by recent activity, then alphabetical.
@@ -412,10 +451,9 @@ impl AppState {
 
     /// Re-sort channels in place (call after activity changes).
     pub fn resort_channels(&mut self) {
+        let selected_id = self.active_channel_id();
         let mut channels = std::mem::take(&mut self.channels);
         self.sort_channels(&mut channels);
-        // Preserve selection by id
-        let selected_id = self.active_channel_id();
         self.channels = channels;
         if let Some(id) = selected_id {
             if let Some(pos) = self.channels.iter().position(|c| c.id == id) {
@@ -634,6 +672,17 @@ impl AppState {
             .get(user_id)
             .map(|u| u.display_name())
             .unwrap_or(user_id)
+    }
+
+    pub fn user_color(&self, user_id: &str) -> ratatui::style::Color {
+        if let Some(user) = self.user_cache.get(user_id) {
+            if let Some(hex) = &user.color {
+                if let Some(c) = parse_hex_color(hex) {
+                    return c;
+                }
+            }
+        }
+        ratatui::style::Color::Green
     }
 
     /// Get display name for an MPIM channel from its member user IDs.
@@ -956,6 +1005,59 @@ impl AppState {
         self.dirty = true;
     }
 
+    pub fn avatar_url(&self, user_id: &str) -> Option<&str> {
+        self.user_cache
+            .get(user_id)?
+            .profile
+            .as_ref()?
+            .image_48
+            .as_deref()
+    }
+
+    pub fn request_avatar(&mut self, user_id: &str) {
+        if !self.avatar_images.contains_key(user_id)
+            && !self.pending_avatar_images.contains(user_id)
+        {
+            self.avatar_load_queue.push(user_id.to_string());
+        }
+    }
+
+    pub fn open_user_picker(&mut self) {
+        self.input_mode = InputMode::UserPicker;
+        self.user_picker_query.clear();
+        self.user_picker_selected = 0;
+        self.filter_user_picker();
+        self.dirty = true;
+    }
+
+    pub fn filter_user_picker(&mut self) {
+        let query = self.user_picker_query.to_lowercase();
+        let mut results: Vec<(String, String)> = self
+            .user_cache
+            .iter()
+            .filter(|(_, user)| !user.deleted && !user.is_bot)
+            .filter(|(_, user)| {
+                query.is_empty()
+                    || user.display_name().to_lowercase().contains(&query)
+                    || user.name.to_lowercase().contains(&query)
+            })
+            .map(|(id, user)| (id.clone(), user.display_name().to_string()))
+            .collect();
+
+        if !query.is_empty() {
+            results.sort_by(|a, b| {
+                let a_prefix = a.1.to_lowercase().starts_with(&query);
+                let b_prefix = b.1.to_lowercase().starts_with(&query);
+                b_prefix.cmp(&a_prefix).then(a.1.cmp(&b.1))
+            });
+        } else {
+            results.sort_by(|a, b| a.1.cmp(&b.1));
+        }
+
+        self.user_picker_results = results;
+        self.user_picker_selected = 0;
+    }
+
     /// Filter emoji picker results based on current query.
     pub fn filter_emoji_picker(&mut self) {
         let query = self.emoji_picker_query.to_lowercase();
@@ -1148,6 +1250,17 @@ impl AppState {
                 (self.selected_message_idx + (-delta) as usize).min(max);
         }
     }
+}
+
+fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(ratatui::style::Color::Rgb(r, g, b))
 }
 
 #[cfg(test)]
