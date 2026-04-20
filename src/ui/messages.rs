@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     // Build all lines as owned data (Line<'static>) so we don't borrow state
     let msg_count = state.message_count();
     let selected_idx = msg_count.saturating_sub(1).saturating_sub(state.selected_message_idx);
-    let (lines, placements, msg_line_starts, emoji_needed, avatars) = build_lines(state, width, selected_idx);
+    let (lines, placements, msg_line_starts, emoji_needed, avatars, content_line_count) = build_lines(state, width, selected_idx);
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(height);
 
@@ -114,8 +114,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     frame.render_widget(paragraph, area);
 
-    // Scrollbar
-    if total_lines > height {
+    // Scrollbar (based on message content, excluding ephemeral typing indicator)
+    if content_line_count > height {
         let thumb_style = if is_focused {
             Style::default().fg(Color::Cyan)
         } else {
@@ -126,17 +126,17 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
             .end_symbol(None)
             .thumb_style(thumb_style)
             .track_style(Style::default().fg(Color::DarkGray));
-        let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll_y);
+        let sb_max = content_line_count.saturating_sub(height);
+        let mut scrollbar_state = ScrollbarState::new(content_line_count).position(scroll_y.min(sb_max));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
 
-/// Returns (lines, image_placements, msg_line_starts, emoji_needed).
 fn build_lines(
     state: &AppState,
     width: usize,
     selected_idx: usize,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>, Vec<String>, Vec<(String, usize)>) {
+) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>, Vec<String>, Vec<(String, usize)>, usize) {
     let messages = state.channel_messages();
 
     let mut placements = Vec::new();
@@ -185,6 +185,8 @@ fn build_lines(
         }
     };
 
+    let content_line_count = result.len();
+
     // Typing indicator at the bottom
     if let Some(typing) = state.typing_display() {
         result.push(Line::from(""));
@@ -196,7 +198,7 @@ fn build_lines(
         )));
     }
 
-    (result, placements, msg_line_starts, emoji_needed, avatars)
+    (result, placements, msg_line_starts, emoji_needed, avatars, content_line_count)
 }
 
 fn render_message(
@@ -912,7 +914,8 @@ mod tests {
         ];
         let state = state_with(messages, &["http://img1", "http://img2"]);
 
-        let (lines, placements, starts, _, _) = build_lines(&state, 80, 3);
+        let (lines, placements, starts, _, _, _) = build_lines(&state, 80, 3);
+
 
         for p in &placements {
             assert!(
@@ -963,7 +966,7 @@ mod tests {
         let state = state_with(messages, &refs);
 
         for sel_idx in 0..20 {
-            let (lines, placements, starts, _, _) = build_lines(&state, 80, sel_idx);
+            let (lines, placements, starts, _, _, _) = build_lines(&state, 80, sel_idx);
 
             for p in &placements {
                 assert!(
@@ -984,7 +987,7 @@ mod tests {
     #[test]
     fn empty_channel_no_placements() {
         let state = state_with(vec![], &[]);
-        let (lines, placements, starts, _, _) = build_lines(&state, 80, 0);
+        let (lines, placements, starts, _, _, _) = build_lines(&state, 80, 0);
 
         assert!(placements.is_empty());
         assert!(starts.is_empty());
@@ -997,7 +1000,7 @@ mod tests {
         let messages = vec![msg_with_image("hi", "1000.0", "http://not_cached")];
         let state = state_with(messages, &[]); // no cached URLs
 
-        let (_, placements, _, _, _) = build_lines(&state, 80, 0);
+        let (_, placements, _, _, _, _) = build_lines(&state, 80, 0);
         assert!(placements.is_empty());
     }
 
@@ -1011,7 +1014,7 @@ mod tests {
         let state = state_with(messages, &["http://img"]);
 
         for width in [1, 5, 20, 80, 200, 400] {
-            let (lines, placements, starts, _, _) = build_lines(&state, width, 1);
+            let (lines, placements, starts, _, _, _) = build_lines(&state, width, 1);
 
             for p in &placements {
                 assert!(

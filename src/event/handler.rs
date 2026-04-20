@@ -150,6 +150,20 @@ pub fn handle_event<C: SlackApi>(
             state.pending_avatar_images.remove(&user_id);
             HandleResult::Continue
         }
+        Event::SearchResultsLoaded {
+            query,
+            matches,
+            total,
+        } => {
+            if query == state.global_search_query {
+                state.global_search_results = matches;
+                state.global_search_total = total;
+                state.global_search_loading = false;
+                state.global_search_selected = 0;
+                state.dirty = true;
+            }
+            HandleResult::Continue
+        }
         Event::ApiError(err) => {
             state.last_error = Some(err);
             state.dirty = true;
@@ -196,6 +210,7 @@ fn handle_key<C: SlackApi>(
         InputMode::Reaction => handle_reaction_key(key, state, client, event_tx),
         InputMode::EmojiPicker => handle_emoji_picker_key(key, state, client, event_tx),
         InputMode::UserPicker => handle_user_picker_key(key, state),
+        InputMode::GlobalSearch => handle_global_search_key(key, state, client, event_tx),
     }
 }
 
@@ -234,6 +249,13 @@ fn handle_normal_channels<C: SlackApi>(
         }
         KeyCode::Char('F') => {
             state.show_fps = !state.show_fps;
+        }
+        KeyCode::Char('S') => {
+            state.input_mode = InputMode::GlobalSearch;
+            state.global_search_query.clear();
+            state.global_search_results.clear();
+            state.global_search_selected = 0;
+            state.global_search_loading = false;
         }
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => state.channel_next(),
@@ -357,6 +379,13 @@ fn handle_normal_messages<C: SlackApi>(
         }
         KeyCode::Char('F') => {
             state.show_fps = !state.show_fps;
+        }
+        KeyCode::Char('S') => {
+            state.input_mode = InputMode::GlobalSearch;
+            state.global_search_query.clear();
+            state.global_search_results.clear();
+            state.global_search_selected = 0;
+            state.global_search_loading = false;
         }
         // Message selection (j/k navigate between messages)
         KeyCode::Char('j') | KeyCode::Down => {
@@ -512,6 +541,13 @@ fn handle_normal_thread<C: SlackApi>(
         }
         KeyCode::Char('F') => {
             state.show_fps = !state.show_fps;
+        }
+        KeyCode::Char('S') => {
+            state.input_mode = InputMode::GlobalSearch;
+            state.global_search_query.clear();
+            state.global_search_results.clear();
+            state.global_search_selected = 0;
+            state.global_search_loading = false;
         }
         // Close thread
         KeyCode::Esc | KeyCode::Char('h') => {
@@ -1017,6 +1053,74 @@ fn handle_user_picker_key(
     HandleResult::Continue
 }
 
+// ── Global search ──────────────────────────────────────────────────────────
+
+fn handle_global_search_key<C: SlackApi>(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+    client: &C,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc => {
+            state.input_mode = InputMode::Normal;
+            state.global_search_results.clear();
+        }
+        KeyCode::Enter => {
+            if !state.global_search_results.is_empty() {
+                if let Some(result) = state
+                    .global_search_results
+                    .get(state.global_search_selected)
+                    .cloned()
+                {
+                    if let Some(ch) = &result.channel {
+                        let channel_id = ch.id.clone();
+                        state.global_search_results.clear();
+                        state.input_mode = InputMode::Normal;
+                        if let Some(idx) =
+                            state.channels.iter().position(|c| c.id == channel_id)
+                        {
+                            state.selected_channel_idx = idx;
+                            state.close_thread();
+                            state.clear_message_search();
+                            state.focus = Focus::Messages;
+                            state.selected_message_idx = 0;
+                            ensure_history_loaded(state, client, event_tx);
+                        }
+                    }
+                }
+            } else if !state.global_search_query.is_empty() && !state.global_search_loading {
+                state.global_search_loading = true;
+                spawn_search_messages(client, &state.global_search_query, event_tx);
+            }
+        }
+        KeyCode::Backspace => {
+            state.global_search_query.pop();
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if !state.global_search_results.is_empty() {
+                state.global_search_selected =
+                    (state.global_search_selected + 1) % state.global_search_results.len();
+            }
+        }
+        KeyCode::Up | KeyCode::BackTab => {
+            if !state.global_search_results.is_empty() {
+                if state.global_search_selected == 0 {
+                    state.global_search_selected = state.global_search_results.len() - 1;
+                } else {
+                    state.global_search_selected -= 1;
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            state.global_search_query.push(c);
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
 // ── Mouse ──────────────────────────────────────────────────────────────────
 
 fn handle_mouse_event<C: SlackApi>(
@@ -1040,23 +1144,36 @@ fn handle_mouse_event<C: SlackApi>(
         MouseEventKind::ScrollUp => {
             if contains(state.channel_list_area, col, row) {
                 state.channel_prev();
+                state.dirty = true;
             } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
+                let old = state.thread_scroll_offset;
                 state.thread_scroll_offset = (state.thread_scroll_offset + scroll_lines)
                     .min(state.thread_max_scroll_offset);
+                if state.thread_scroll_offset != old {
+                    state.dirty = true;
+                }
             } else if contains(state.messages_area, col, row) {
-                state.message_select_page(-1);
+                if state.message_select_page(-1) {
+                    state.dirty = true;
+                }
+                maybe_load_older(state, client, event_tx);
             }
-            state.dirty = true;
         }
         MouseEventKind::ScrollDown => {
             if contains(state.channel_list_area, col, row) {
                 state.channel_next();
+                state.dirty = true;
             } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
+                let old = state.thread_scroll_offset;
                 state.thread_scroll_offset = state.thread_scroll_offset.saturating_sub(scroll_lines);
+                if state.thread_scroll_offset != old {
+                    state.dirty = true;
+                }
             } else if contains(state.messages_area, col, row) {
-                state.message_select_page(1);
+                if state.message_select_page(1) {
+                    state.dirty = true;
+                }
             }
-            state.dirty = true;
         }
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             if contains(state.channel_list_area, col, row) {
@@ -1452,6 +1569,37 @@ fn spawn_mark_read<C: SlackApi>(
             }
             Err(e) => {
                 error!("Failed to mark channel: {}", e);
+            }
+        }
+    });
+}
+
+fn spawn_search_messages<C: SlackApi>(
+    client: &C,
+    query: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let query = query.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        match client.search_messages(&query, 1, 20).await {
+            Ok(data) => {
+                let total = data
+                    .messages
+                    .paging
+                    .as_ref()
+                    .and_then(|p| p.total)
+                    .unwrap_or(0);
+                let _ = tx.send(Event::SearchResultsLoaded {
+                    query,
+                    matches: data.messages.matches,
+                    total,
+                });
+            }
+            Err(e) => {
+                error!("Search failed: {}", e);
+                let _ = tx.send(Event::ApiError(format!("Search: {}", e)));
             }
         }
     });

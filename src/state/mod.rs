@@ -223,6 +223,13 @@ pub struct AppState {
     // Channel sort
     pub channels_need_resort: bool,
 
+    // Global search (Slack search.messages API)
+    pub global_search_query: String,
+    pub global_search_results: Vec<crate::slack::types::SearchMatch>,
+    pub global_search_selected: usize,
+    pub global_search_loading: bool,
+    pub global_search_total: u32,
+
     // Pane areas for mouse hit testing (set during render)
     pub channel_list_area: Rect,
     pub messages_area: Rect,
@@ -302,6 +309,7 @@ pub enum InputMode {
     Reaction,
     EmojiPicker,
     UserPicker,
+    GlobalSearch,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -384,6 +392,11 @@ impl AppState {
             channel_list_items: Vec::new(),
             channel_list_offset: 0,
             channels_need_resort: false,
+            global_search_query: String::new(),
+            global_search_results: Vec::new(),
+            global_search_selected: 0,
+            global_search_loading: false,
+            global_search_total: 0,
             channel_list_area: Rect::default(),
             messages_area: Rect::default(),
             thread_area: None,
@@ -649,13 +662,17 @@ impl AppState {
         self.channel_messages().map(|m| m.len()).unwrap_or(0)
     }
 
-    pub fn message_select_newer(&mut self) {
+    pub fn message_select_newer(&mut self) -> bool {
+        let old = self.selected_message_idx;
         self.selected_message_idx = self.selected_message_idx.saturating_sub(1);
+        self.selected_message_idx != old
     }
 
-    pub fn message_select_older(&mut self) {
+    pub fn message_select_older(&mut self) -> bool {
+        let old = self.selected_message_idx;
         let max = self.message_count().saturating_sub(1);
         self.selected_message_idx = (self.selected_message_idx + 1).min(max);
+        self.selected_message_idx != old
     }
 
     pub fn selected_message(&self) -> Option<&Message> {
@@ -1241,7 +1258,8 @@ impl AppState {
     }
 
     /// Move selection by N messages (positive = newer, negative = older).
-    pub fn message_select_page(&mut self, delta: isize) {
+    pub fn message_select_page(&mut self, delta: isize) -> bool {
+        let old = self.selected_message_idx;
         let max = self.message_count().saturating_sub(1);
         if delta > 0 {
             self.selected_message_idx = self.selected_message_idx.saturating_sub(delta as usize);
@@ -1249,6 +1267,7 @@ impl AppState {
             self.selected_message_idx =
                 (self.selected_message_idx + (-delta) as usize).min(max);
         }
+        self.selected_message_idx != old
     }
 }
 
