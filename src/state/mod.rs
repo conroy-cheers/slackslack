@@ -233,6 +233,17 @@ pub struct AppState {
     pub emoji_picker_message_reactions: Vec<(String, bool)>, // (name, user_has_reacted)
     pub emoji_picker_inline_colon_pos: Option<usize>, // char position of the ':' that triggered inline picker
 
+    // Emoji 3D preview
+    pub emoji_preview_char: String,
+    pub emoji_preview_name: String,
+    pub emoji_preview_tick: u64,
+    pub emoji_preview_frames: Vec<Vec<[u8; 4]>>,
+    pub emoji_preview_frame_delays: Vec<u32>,
+    pub emoji_preview_tex_w: u32,
+    pub emoji_preview_tex_h: u32,
+    pub emoji_preview_pending: bool,
+    pub billboard_renderer: crate::ui::emoji_preview::BillboardRenderer,
+
     // User picker
     pub user_picker_query: String,
     pub user_picker_selected: usize,
@@ -334,6 +345,7 @@ pub enum InputMode {
     UserPicker,
     GlobalSearch,
     FilePath,      // file path input for upload
+    EmojiPreview,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -422,6 +434,15 @@ impl AppState {
             emoji_picker_source: EmojiPickerSource::Reaction,
             emoji_picker_message_reactions: Vec::new(),
             emoji_picker_inline_colon_pos: None,
+            emoji_preview_char: String::new(),
+            emoji_preview_name: String::new(),
+            emoji_preview_tick: 0,
+            emoji_preview_frames: Vec::new(),
+            emoji_preview_frame_delays: Vec::new(),
+            emoji_preview_tex_w: 0,
+            emoji_preview_tex_h: 0,
+            emoji_preview_pending: false,
+            billboard_renderer: crate::ui::emoji_preview::BillboardRenderer::Cpu,
             user_picker_query: String::new(),
             user_picker_selected: 0,
             user_picker_results: Vec::new(),

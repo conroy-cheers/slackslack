@@ -1940,3 +1940,28 @@ async fn colon_inside_backticks_does_not_open_picker() {
     assert_eq!(h.state.input_mode, InputMode::Insert);
     assert_eq!(h.state.input_text, "`:");
 }
+
+#[tokio::test]
+async fn ctrl_p_in_emoji_picker_opens_3d_preview() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('r');
+    assert_eq!(h.state.input_mode, InputMode::EmojiPicker);
+    assert!(!h.state.emoji_picker_results.is_empty());
+    let expected_name = h.state.emoji_picker_results[0].0.clone();
+    h.press_ctrl('p');
+    assert_eq!(h.state.input_mode, InputMode::EmojiPreview);
+    assert_eq!(h.state.emoji_preview_name, expected_name);
+    assert_eq!(h.state.emoji_preview_tick, 0);
+}
+
+#[tokio::test]
+async fn emoji_preview_esc_returns_to_picker() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('r');
+    h.press_ctrl('p');
+    assert_eq!(h.state.input_mode, InputMode::EmojiPreview);
+    h.press_esc();
+    assert_eq!(h.state.input_mode, InputMode::EmojiPicker);
+}

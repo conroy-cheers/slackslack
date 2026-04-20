@@ -82,6 +82,13 @@ pub enum Event {
         total: u32,
     },
 
+    EmojiPreviewImageLoaded {
+        frames: Vec<Vec<[u8; 4]>>,
+        frame_delays: Vec<u32>,
+        width: u32,
+        height: u32,
+    },
+
     // Internal
     Tick,
 }

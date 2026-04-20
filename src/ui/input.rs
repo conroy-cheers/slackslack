@@ -77,7 +77,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 )
             }
         }
-        InputMode::EmojiPicker | InputMode::UserPicker | InputMode::MessageSearch | InputMode::Search | InputMode::GlobalSearch => (
+        InputMode::EmojiPicker | InputMode::UserPicker | InputMode::MessageSearch | InputMode::Search | InputMode::GlobalSearch | InputMode::EmojiPreview => (
             " i to type | / search | ? help ".to_string(),
             "",
             Style::default().fg(Color::DarkGray),

@@ -262,6 +262,31 @@ fn emoji_picker_render_no_panic() {
         .unwrap();
 }
 
+/// Full render with emoji 3D preview open — no panics.
+#[test]
+fn emoji_preview_render_no_panic() {
+    let mut state = state_with_image_messages(5, 0);
+    state.input_mode = InputMode::EmojiPreview;
+    state.emoji_preview_char = "\u{1F525}".into();
+    state.emoji_preview_name = "fire".into();
+    state.emoji_preview_tick = 0;
+
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| super::render(frame, &mut state))
+        .unwrap();
+
+    // Advance a few ticks and re-render
+    for t in 1..10 {
+        state.emoji_preview_tick = t;
+        state.dirty = true;
+        terminal
+            .draw(|frame| super::render(frame, &mut state))
+            .unwrap();
+    }
+}
+
 /// Scrollbar rendering does not affect image placement coordinates (regression).
 #[test]
 fn scrollbar_does_not_affect_image_placements() {

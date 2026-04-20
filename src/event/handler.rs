@@ -182,6 +182,15 @@ pub fn handle_event<C: SlackApi>(
             state.dirty = true;
             HandleResult::Continue
         }
+        Event::EmojiPreviewImageLoaded { frames, frame_delays, width, height } => {
+            state.emoji_preview_pending = false;
+            state.emoji_preview_frames = frames;
+            state.emoji_preview_frame_delays = frame_delays;
+            state.emoji_preview_tex_w = width;
+            state.emoji_preview_tex_h = height;
+            state.dirty = true;
+            HandleResult::Continue
+        }
         Event::Tick => {
             state.expire_typing();
             HandleResult::Continue
@@ -227,6 +236,7 @@ fn handle_key<C: SlackApi>(
         InputMode::MessageSearch => handle_message_search_key(key, state),
         InputMode::Reaction => handle_reaction_key(key, state, client, event_tx),
         InputMode::EmojiPicker => handle_emoji_picker_key(key, state, client, event_tx),
+        InputMode::EmojiPreview => handle_emoji_preview_key(key, state),
         InputMode::UserPicker => handle_user_picker_key(key, state),
         InputMode::GlobalSearch => handle_global_search_key(key, state, client, event_tx),
         InputMode::FilePath => handle_file_path_key(key, state, client, event_tx),
@@ -1113,6 +1123,64 @@ fn handle_emoji_picker_key<C: SlackApi>(
                 }
             }
         }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some((name, display, is_custom)) = state.emoji_picker_results.get(state.emoji_picker_selected).cloned() {
+                state.emoji_preview_name = name.clone();
+                state.emoji_preview_char = display.clone();
+                state.emoji_preview_tick = 0;
+                state.emoji_preview_frames.clear();
+                state.emoji_preview_frame_delays.clear();
+                state.emoji_preview_tex_w = 0;
+                state.emoji_preview_tex_h = 0;
+                state.emoji_preview_pending = false;
+                state.input_mode = InputMode::EmojiPreview;
+
+                if matches!(state.billboard_renderer, crate::ui::emoji_preview::BillboardRenderer::Cpu) {
+                    match crate::ui::emoji_preview::gpu::GpuRenderer::try_new() {
+                        Ok(gpu) => {
+                            tracing::info!("GPU renderer initialized");
+                            state.billboard_renderer = crate::ui::emoji_preview::BillboardRenderer::Gpu(gpu);
+                        }
+                        Err(e) => {
+                            tracing::warn!("wgpu init failed, using CPU renderer: {}", e);
+                        }
+                    }
+                }
+
+                if is_custom {
+                    if let Some(key) = state.resolve_emoji_key(&name) {
+                        if let Some(cached) = state.custom_emoji_images.get(&key) {
+                            // Use cached PNG — decode frames from it
+                            if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&cached.png_data) {
+                                state.emoji_preview_frames = frames;
+                                state.emoji_preview_frame_delays = delays;
+                                state.emoji_preview_tex_w = w;
+                                state.emoji_preview_tex_h = h;
+                            } else {
+                                // Try fetching original (might be animated GIF)
+                                state.emoji_preview_pending = true;
+                                spawn_download_emoji_preview(client, &key, event_tx);
+                            }
+                        } else {
+                            state.emoji_preview_pending = true;
+                            spawn_download_emoji_preview(client, &key, event_tx);
+                        }
+                    }
+                } else {
+                    let unified = display.chars()
+                        .filter(|&c| c != '\u{fe0f}')
+                        .map(|c| format!("{:x}", c as u32))
+                        .collect::<Vec<_>>()
+                        .join("-");
+                    let url = format!(
+                        "https://cdn.jsdelivr.net/gh/twitter/twemoji@latest/assets/72x72/{}.png",
+                        unified
+                    );
+                    state.emoji_preview_pending = true;
+                    spawn_download_emoji_preview_url(&url, event_tx);
+                }
+            }
+        }
         KeyCode::Char(c) => {
             state.emoji_picker_query.push(c);
             if let Some(colon_pos) = inline {
@@ -1123,6 +1191,22 @@ fn handle_emoji_picker_key<C: SlackApi>(
                 state.input_cursor = insert_char_pos + 1;
             }
             state.filter_emoji_picker();
+        }
+        _ => {}
+    }
+    HandleResult::Continue
+}
+
+// ── Emoji 3D preview ──────────────────────────────────────────────────────
+
+fn handle_emoji_preview_key(
+    key: crossterm::event::KeyEvent,
+    state: &mut AppState,
+) -> HandleResult {
+    state.dirty = true;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.input_mode = InputMode::EmojiPicker;
         }
         _ => {}
     }
@@ -2176,6 +2260,92 @@ fn spawn_download_image<C: SlackApi>(
             }
             Err(e) => {
                 error!("Failed to download image {}: {}", url, e);
+            }
+        }
+    });
+}
+
+fn spawn_download_emoji_preview<C: SlackApi>(
+    client: &C,
+    url: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let client = client.clone();
+    let url = url.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let send_empty = |tx: &mpsc::UnboundedSender<Event>| {
+            let _ = tx.send(Event::EmojiPreviewImageLoaded {
+                frames: vec![],
+                frame_delays: vec![],
+                width: 0,
+                height: 0,
+            });
+        };
+        match client.download_file(&url).await {
+            Ok(data) => {
+                if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&data) {
+                    let _ = tx.send(Event::EmojiPreviewImageLoaded {
+                        frames,
+                        frame_delays: delays,
+                        width: w,
+                        height: h,
+                    });
+                } else {
+                    send_empty(&tx);
+                }
+            }
+            Err(e) => {
+                error!("Failed to download emoji preview {}: {}", url, e);
+                send_empty(&tx);
+            }
+        }
+    });
+}
+
+fn spawn_download_emoji_preview_url(
+    url: &str,
+    event_tx: &mpsc::UnboundedSender<Event>,
+) {
+    let url = url.to_string();
+    let tx = event_tx.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let http = reqwest::Client::new();
+            let resp = http.get(&url).send().await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("HTTP {}", resp.status());
+            }
+            let data = resp.bytes().await?;
+            Ok::<_, anyhow::Error>(data)
+        }
+        .await;
+        match result {
+            Ok(data) => {
+                if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&data) {
+                    let _ = tx.send(Event::EmojiPreviewImageLoaded {
+                        frames,
+                        frame_delays: delays,
+                        width: w,
+                        height: h,
+                    });
+                } else {
+                    let _ = tx.send(Event::EmojiPreviewImageLoaded {
+                        frames: vec![],
+                        frame_delays: vec![],
+                        width: 0,
+                        height: 0,
+                    });
+                }
+            }
+            Err(e) => {
+                error!("Failed to download emoji preview {}: {}", url, e);
+                let _ = tx.send(Event::EmojiPreviewImageLoaded {
+                    frames: vec![],
+                    frame_delays: vec![],
+                    width: 0,
+                    height: 0,
+                });
             }
         }
     });

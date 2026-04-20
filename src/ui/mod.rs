@@ -2,6 +2,7 @@ mod channels;
 pub(crate) mod context_menu;
 pub mod emoji;
 mod emoji_picker;
+pub(crate) mod emoji_preview;
 mod global_search;
 mod help;
 pub mod images;
@@ -145,7 +146,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             let y = input_area.y + 1;
             frame.set_cursor_position((x, y));
         }
-        InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker | InputMode::GlobalSearch => {}
+        InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker | InputMode::GlobalSearch | InputMode::EmojiPreview => {}
     }
 
     // Help overlay (rendered last so it's on top)
@@ -177,6 +178,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         let msg_area = state.messages_area;
         context_menu::render(frame, state, msg_area);
         state.occlusion_rects.push(context_menu::overlay_rect(state, msg_area));
+    }
+
+    // 3D emoji preview (on top of everything)
+    if state.input_mode == InputMode::EmojiPreview {
+        emoji_preview::render(frame, state);
+        state.occlusion_rects.push(emoji_preview::overlay_rect(frame.area()));
     }
 }
 

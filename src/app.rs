@@ -149,8 +149,13 @@ impl App {
                     crate::event::handler::process_avatar_load_queue(&mut self.state, &self.client, &self.event_tx);
                 }
                 _ = tick.tick() => {
-                    // Periodic maintenance
                     self.state.expire_typing();
+                    if self.state.input_mode == crate::state::InputMode::EmojiPreview
+                        && !self.state.emoji_preview_frames.is_empty()
+                    {
+                        self.state.emoji_preview_tick += 1;
+                        self.state.dirty = true;
+                    }
                     Self::render_frame(&mut self.state, &mut terminal)?;
                     crate::event::handler::process_emoji_load_queue(&mut self.state, &self.client, &self.event_tx);
                     crate::event::handler::process_avatar_load_queue(&mut self.state, &self.client, &self.event_tx);

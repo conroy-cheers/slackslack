@@ -39,6 +39,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 libc = "0.2"
 
+# GPU rendering (3D emoji preview)
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
 # Notifications
 notify-rust = "4"
 

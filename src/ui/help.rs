@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame) {
                 ("i / a", "Enter insert mode (type message)"),
                 ("R", "Reply in thread"),
                 ("r", "Pick emoji reaction"),
+                ("Ctrl+p", "3D emoji preview (in emoji picker)"),
                 ("y", "Copy selected message to clipboard"),
                 ("Space", "Open context menu for message"),
                 ("/ (channels)", "Search channels"),
