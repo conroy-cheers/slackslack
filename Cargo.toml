@@ -10,11 +10,11 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
 # HTTP
-reqwest = { version = "0.12", features = ["json", "multipart", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -47,6 +47,10 @@ unicode-width = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 
 [profile.release]
 lto = true

@@ -38,15 +38,8 @@
               clippy
               rustfmt
               pkg-config
-              openssl
+              mold
             ];
-
-            env = {
-              OPENSSL_DIR = "${pkgs.openssl.dev}";
-              OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
-            };
-
-            shellHook = "";
           };
         }
       );
