@@ -3,6 +3,7 @@ use super::mock_client::ApiCall;
 use crate::event::Event;
 use crate::slack::types::{WsEvent, WsMessage};
 use crate::state::{Focus, InputMode};
+use crossterm::event::KeyCode;
 
 fn ws_msg(channel: &str, user: &str, text: &str, ts: &str, thread_ts: Option<&str>) -> Event {
     Event::SlackWsEvent(WsEvent::Message(WsMessage {
@@ -798,4 +799,486 @@ async fn send_thread_reply_appears_in_thread_after_ws_echo() {
     );
     let thread_msgs = h.state.thread_messages().unwrap();
     assert_eq!(thread_msgs.last().unwrap().text, "my new reply");
+}
+
+// ── Thread reply should not appear in channel messages ─────────────────
+
+#[tokio::test]
+async fn ws_thread_reply_does_not_appear_in_channel_messages() {
+    let mut h = setup_workspace();
+    let initial_count = h.state.channel_data.get("C_GEN").unwrap().messages.len();
+
+    // A thread reply arrives via WS (thread_ts != ts, so it's a reply not a parent)
+    h.send_event(ws_msg("C_GEN", "U_ALICE", "thread only reply", "1001.003", Some("1001.000")));
+
+    let cd = h.state.channel_data.get("C_GEN").unwrap();
+    assert_eq!(
+        cd.messages.len(),
+        initial_count,
+        "thread reply should NOT be added to channel messages list"
+    );
+    // But it should be in the thread
+    let thread = cd.threads.get("1001.000").unwrap();
+    assert!(
+        thread.iter().any(|m| m.text == "thread only reply"),
+        "thread reply should be in the thread's replies"
+    );
+}
+
+// ── Reaction workflow ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn emoji_picker_confirm_sends_reaction() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('r'); // open emoji picker
+    h.assert_mode(InputMode::EmojiPicker);
+    // Type to search for an emoji, then confirm
+    h.type_text("thumbsup");
+    h.press_enter(); // confirm selection
+    h.yield_to_spawned_tasks().await;
+    // Should return to normal mode
+    h.assert_mode(InputMode::Normal);
+    // Should have sent a reaction API call
+    let calls = h.api_calls();
+    let reaction = calls.iter().find(|c| matches!(c, ApiCall::AddReaction { .. }));
+    assert!(reaction.is_some(), "expected AddReaction call, got {:?}", calls);
+}
+
+
+// ── Input editing ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn backspace_deletes_character() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("hello");
+    h.press_key(KeyCode::Backspace);
+    h.assert_input_text("hell");
+}
+
+#[tokio::test]
+async fn cursor_movement_left_right() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("abc");
+    h.press_key(KeyCode::Left);
+    h.press_key(KeyCode::Left);
+    // Cursor is now after 'a', typing inserts at cursor
+    h.type_text("X");
+    h.assert_input_text("aXbc");
+}
+
+#[tokio::test]
+async fn home_end_keys() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.type_text("hello");
+    h.press_key(KeyCode::Home);
+    h.type_text("X");
+    h.assert_input_text("Xhello");
+    h.press_key(KeyCode::End);
+    h.type_text("Y");
+    h.assert_input_text("XhelloY");
+}
+
+#[tokio::test]
+async fn empty_message_not_sent() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('i');
+    h.press_enter(); // send with empty input
+    h.yield_to_spawned_tasks().await;
+    let calls = h.api_calls();
+    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    assert!(post.is_none(), "empty message should not be sent");
+}
+
+#[tokio::test]
+async fn whitespace_only_message_not_sent() {
+    let mut h = setup_workspace();
+    h.press_enter();
+    h.press_char('i');
+    h.type_text("   ");
+    h.press_enter();
+    h.yield_to_spawned_tasks().await;
+    let calls = h.api_calls();
+    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    assert!(post.is_none(), "whitespace-only message should not be sent");
+}
+
+// ── Input history ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn input_history_up_down() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    // Send two messages to populate history
+    h.press_char('i');
+    h.type_text("first msg");
+    h.press_enter();
+    h.type_text("second msg");
+    h.press_enter();
+    // Now up arrow should recall history
+    h.press_key(KeyCode::Up);
+    h.assert_input_text("second msg");
+    h.press_key(KeyCode::Up);
+    h.assert_input_text("first msg");
+    h.press_key(KeyCode::Down);
+    h.assert_input_text("second msg");
+}
+
+// ── Unread counts ──────────────────────────────────────────────────────
+
+
+// ── Channel navigation edge cases ─────────────────────────────────────
+
+#[tokio::test]
+async fn j_at_last_channel_wraps_to_first() {
+    let mut h = setup_workspace();
+    h.press_char('j'); // C_RAND
+    h.press_char('j'); // D_ALICE
+    h.assert_active_channel("D_ALICE");
+    h.press_char('j'); // wraps to C_GEN
+    h.assert_active_channel("C_GEN");
+}
+
+#[tokio::test]
+async fn k_at_first_channel_wraps_to_last() {
+    let mut h = setup_workspace();
+    h.assert_active_channel("C_GEN");
+    h.press_char('k'); // wraps to D_ALICE
+    h.assert_active_channel("D_ALICE");
+}
+
+// ── Message navigation edge cases ─────────────────────────────────────
+
+#[tokio::test]
+async fn message_nav_on_empty_channel_does_not_panic() {
+    let mut h = TestHarness::new();
+    h.add_channel("C_EMPTY", "empty");
+    h.press_enter(); // -> Messages on empty channel
+    h.press_char('j'); // should not panic
+    h.press_char('k'); // should not panic
+    h.press_char('G'); // should not panic
+    h.press_char('g'); // should not panic
+    assert_eq!(h.selected_message_idx(), 0);
+}
+
+#[tokio::test]
+async fn message_nav_boundary_oldest_stays() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('g'); // oldest message
+    h.assert_selected_message("oldest message");
+    h.press_char('k'); // try to go older
+    h.assert_selected_message("oldest message"); // should stay
+}
+
+#[tokio::test]
+async fn message_nav_boundary_newest_stays() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.assert_selected_message("newest message");
+    h.press_char('j'); // try to go newer
+    h.assert_selected_message("newest message"); // should stay
+}
+
+// ── Thread on message without existing thread ──────────────────────────
+
+#[tokio::test]
+async fn enter_on_non_threaded_message_opens_thread() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    // Select newest message (no thread_ts, no reply_count)
+    h.assert_selected_message("newest message");
+    h.press_enter(); // open thread
+    h.assert_focus(Focus::Thread);
+    // Thread should open with the message's own ts as parent_ts
+    h.assert_thread_open("C_GEN", "1002.000");
+}
+
+// ── Multiple WS messages ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn rapid_ws_messages_all_appended() {
+    let mut h = setup_workspace();
+    let initial = h.state.channel_data.get("C_GEN").unwrap().messages.len();
+    for i in 0..10 {
+        h.send_event(ws_msg("C_GEN", "U_ALICE", &format!("rapid {}", i), &format!("5000.{:03}", i), None));
+    }
+    let final_count = h.state.channel_data.get("C_GEN").unwrap().messages.len();
+    assert_eq!(final_count, initial + 10, "all 10 rapid messages should be appended");
+}
+
+#[tokio::test]
+async fn duplicate_ws_message_not_added_twice() {
+    let mut h = setup_workspace();
+    let initial = h.state.channel_data.get("C_GEN").unwrap().messages.len();
+    h.send_event(ws_msg("C_GEN", "U_ALICE", "dup msg", "5000.000", None));
+    h.send_event(ws_msg("C_GEN", "U_ALICE", "dup msg", "5000.000", None));
+    let final_count = h.state.channel_data.get("C_GEN").unwrap().messages.len();
+    assert_eq!(final_count, initial + 1, "duplicate message should not be added twice");
+}
+
+// ── WS events for unknown channels ────────────────────────────────────
+
+#[tokio::test]
+async fn ws_message_for_unknown_channel_creates_channel_data() {
+    let mut h = setup_workspace();
+    assert!(!h.state.channel_data.contains_key("C_UNKNOWN"));
+    h.send_event(ws_msg("C_UNKNOWN", "U_ALICE", "hello unknown", "9000.000", None));
+    assert!(h.state.channel_data.contains_key("C_UNKNOWN"));
+    assert_eq!(h.state.channel_data.get("C_UNKNOWN").unwrap().messages.len(), 1);
+}
+
+// ── Disconnect / reconnect ────────────────────────────────────────────
+
+#[tokio::test]
+async fn disconnect_event_sets_connected_false() {
+    let mut h = setup_workspace();
+    h.send_event(Event::SlackConnected { self_id: "U_ME".into(), team: "T".into() });
+    assert!(h.is_connected());
+    h.send_event(Event::SlackDisconnected);
+    assert!(!h.is_connected());
+}
+
+// ── Insert mode from different contexts ────────────────────────────────
+
+#[tokio::test]
+async fn a_enters_insert_mode() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('a');
+    h.assert_mode(InputMode::Insert);
+    h.assert_focus(Focus::Input);
+}
+
+#[tokio::test]
+async fn insert_from_channel_list_does_not_reply_to_thread() {
+    let mut h = setup_workspace();
+    h.press_char('i'); // enter insert from channel list
+    assert!(!h.reply_to_thread());
+    h.type_text("msg");
+    h.press_enter();
+    h.yield_to_spawned_tasks().await;
+    let calls = h.api_calls();
+    if let Some(ApiCall::PostMessage { thread_ts, .. }) = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. })) {
+        assert!(thread_ts.is_none(), "message from channel list should not have thread_ts");
+    }
+}
+
+// ── Section collapse ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn section_collapse_via_state() {
+    let mut h = setup_workspace();
+    assert!(!h.state.collapsed_sections.contains("SEC1"));
+    h.state.toggle_section_collapse("SEC1");
+    assert!(h.state.collapsed_sections.contains("SEC1"));
+    h.state.toggle_section_collapse("SEC1");
+    assert!(!h.state.collapsed_sections.contains("SEC1"));
+}
+
+// ── History loading ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn history_loaded_event_sets_messages() {
+    let mut h = setup_workspace();
+    h.send_event(Event::HistoryLoaded {
+        channel_id: "C_GEN".into(),
+        messages: vec![msg("loaded msg", "100.000")],
+        has_more: true,
+    });
+    let cd = h.state.channel_data.get("C_GEN").unwrap();
+    assert_eq!(cd.messages.len(), 1);
+    assert_eq!(cd.messages[0].text, "loaded msg");
+    assert!(cd.has_more_history);
+}
+
+#[tokio::test]
+async fn older_history_prepended() {
+    let mut h = setup_workspace();
+    // Already has 3 messages in C_GEN from setup
+    let initial = h.state.channel_data.get("C_GEN").unwrap().messages.len();
+    h.send_event(Event::OlderHistoryLoaded {
+        channel_id: "C_GEN".into(),
+        messages: vec![msg("pretty old", "600.000"), msg("very old", "500.000")],
+        has_more: false,
+    });
+    let cd = h.state.channel_data.get("C_GEN").unwrap();
+    assert_eq!(cd.messages.len(), initial + 2);
+    // Older messages should be at the front (oldest first)
+    assert_eq!(cd.messages[0].text, "very old");
+    assert_eq!(cd.messages[1].text, "pretty old");
+}
+
+// ── Thread loaded event ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn thread_loaded_replaces_thread_messages() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('k'); // select middle
+    h.press_enter(); // -> Thread
+
+    // First load
+    h.send_event(Event::ThreadLoaded {
+        channel_id: "C_GEN".into(),
+        thread_ts: "1001.000".into(),
+        messages: vec![msg("parent", "1001.000"), thread_msg("r1", "1001.001", "1001.000")],
+    });
+    assert_eq!(h.thread_message_count(), 2);
+
+    // Second load replaces
+    h.send_event(Event::ThreadLoaded {
+        channel_id: "C_GEN".into(),
+        thread_ts: "1001.000".into(),
+        messages: vec![
+            msg("parent", "1001.000"),
+            thread_msg("r1", "1001.001", "1001.000"),
+            thread_msg("r2", "1001.002", "1001.000"),
+            thread_msg("r3", "1001.003", "1001.000"),
+        ],
+    });
+    assert_eq!(h.thread_message_count(), 4);
+}
+
+// ── Resize event ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn resize_event_marks_dirty() {
+    let mut h = setup_workspace();
+    h.state.dirty = false;
+    h.send_event(Event::Resize(120, 40));
+    assert!(h.state.dirty);
+}
+
+// ── User picker ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn at_in_insert_opens_user_picker() {
+    let mut h = setup_workspace();
+    h.press_char('i'); // -> Insert
+    h.press_char('@');
+    h.assert_mode(InputMode::UserPicker);
+}
+
+#[tokio::test]
+async fn user_picker_esc_inserts_literal_at() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.press_char('@');
+    h.assert_mode(InputMode::UserPicker);
+    h.press_esc();
+    h.assert_mode(InputMode::Insert);
+    h.assert_input_text("@");
+}
+
+#[tokio::test]
+async fn user_picker_confirm_inserts_mention() {
+    let mut h = setup_workspace();
+    h.press_char('i');
+    h.press_char('@');
+    h.assert_mode(InputMode::UserPicker);
+    // Type to filter, then confirm
+    h.type_text("alice");
+    h.press_enter();
+    h.assert_mode(InputMode::Insert);
+    // Should have inserted a mention
+    let text = h.input_text().to_string();
+    assert!(text.contains("<@U_ALICE>"), "expected mention in input, got: {}", text);
+}
+
+// ── Message sent event ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn message_sent_event_handled() {
+    let mut h = setup_workspace();
+    // MessageSent is fired after a successful chat.postMessage
+    h.send_event(Event::MessageSent {
+        channel_id: "C_GEN".into(),
+        ts: "9999.000".into(),
+    });
+    // Should not crash; state should remain functional
+    h.assert_focus(Focus::ChannelList);
+}
+
+// ── Channel with no messages ───────────────────────────────────────────
+
+#[tokio::test]
+async fn open_channel_with_no_history_does_not_crash() {
+    let mut h = TestHarness::new();
+    h.add_channel("C_EMPTY", "empty");
+    h.press_enter(); // -> Messages
+    h.assert_focus(Focus::Messages);
+    h.press_char('i'); // -> Insert
+    h.assert_mode(InputMode::Insert);
+    h.press_esc();
+    h.assert_focus(Focus::Messages);
+}
+
+// ── Thread reply from Messages pane vs Thread pane ─────────────────────
+
+#[tokio::test]
+async fn i_from_messages_does_not_set_reply_to_thread_even_when_thread_open() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('k'); // select middle
+    h.press_enter(); // -> Thread
+    h.press_tab(); // -> Messages (thread still open)
+    h.assert_focus(Focus::Messages);
+    assert!(h.thread_open());
+    h.press_char('i'); // insert from Messages
+    assert!(!h.reply_to_thread(), "i from Messages should NOT reply to thread");
+}
+
+#[tokio::test]
+async fn big_r_from_messages_sets_reply_to_thread() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('k'); // select middle
+    h.press_char('R');
+    assert!(h.reply_to_thread(), "R from Messages should reply to thread");
+}
+
+// ── Switching channels clears thread state ─────────────────────────────
+
+#[tokio::test]
+async fn bracket_switch_from_messages_with_thread_open_closes_thread() {
+    let mut h = setup_workspace();
+    h.press_enter(); // -> Messages
+    h.press_char('k');
+    h.press_enter(); // -> Thread on C_GEN
+    h.press_tab(); // -> Messages
+    h.assert_focus(Focus::Messages);
+    assert!(h.thread_open());
+    h.press_char(']'); // switch to C_RAND
+    h.assert_active_channel("C_RAND");
+    h.assert_thread_closed();
+}
+
+// ── DM display ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn dm_channel_shows_user_display_name() {
+    let h = setup_workspace();
+    let dm = h.state.channels.iter().find(|c| c.id == "D_ALICE").unwrap();
+    assert!(dm.is_im);
+    assert_eq!(dm.user.as_deref(), Some("U_ALICE"));
+    // The display name for DMs comes from user_display_name
+    let name = h.state.user_display_name("U_ALICE");
+    assert_eq!(name, "Alice");
+}
+
+// ── Self messages should not increment unread ──────────────────────────
+
+#[tokio::test]
+async fn own_message_does_not_increment_unread() {
+    let mut h = setup_workspace();
+    h.set_self_user("U_ME");
+    let before = h.state.channels.iter().find(|c| c.id == "C_RAND").unwrap().unread_count_display;
+    h.send_event(ws_msg("C_RAND", "U_ME", "my own msg", "2002.000", None));
+    let after = h.state.channels.iter().find(|c| c.id == "C_RAND").unwrap().unread_count_display;
+    assert_eq!(after, before, "own messages should not increment unread count");
 }
