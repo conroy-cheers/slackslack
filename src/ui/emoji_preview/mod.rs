@@ -3,7 +3,7 @@ mod cpu;
 pub(crate) mod gpu;
 
 use crate::state::AppState;
-use common::Texture;
+use common::{COLOR_SOURCE_ALPHA_THRESHOLD, Texture, fill_transparent_rgb_from_nearest};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -106,9 +106,7 @@ pub fn overlay_rect(area: Rect) -> Rect {
     area
 }
 
-pub fn decode_emoji_frames(
-    data: &[u8],
-) -> Option<(Vec<Vec<[u8; 4]>>, Vec<u32>, u32, u32)> {
+pub fn decode_emoji_frames(data: &[u8]) -> Option<(Vec<Vec<[u8; 4]>>, Vec<u32>, u32, u32)> {
     if data.len() >= 6 && (&data[0..4] == b"GIF8") {
         if let Ok(decoder) = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(data)) {
             use image::AnimationDecoder;
@@ -125,7 +123,14 @@ pub fn decode_emoji_frames(
                     } else {
                         buf.clone()
                     };
-                    rgba_frames.push(resized.pixels().map(|p| p.0).collect());
+                    let mut pixels: Vec<[u8; 4]> = resized.pixels().map(|p| p.0).collect();
+                    fill_transparent_rgb_from_nearest(
+                        &mut pixels,
+                        w,
+                        h,
+                        COLOR_SOURCE_ALPHA_THRESHOLD,
+                    );
+                    rgba_frames.push(pixels);
                     let (numer, denom) = f.delay().numer_denom_ms();
                     delays.push(if denom == 0 { numer } else { numer / denom });
                 }
@@ -138,6 +143,7 @@ pub fn decode_emoji_frames(
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let h = rgba.height();
-    let pixels: Vec<[u8; 4]> = rgba.pixels().map(|p| p.0).collect();
+    let mut pixels: Vec<[u8; 4]> = rgba.pixels().map(|p| p.0).collect();
+    fill_transparent_rgb_from_nearest(&mut pixels, w, h, COLOR_SOURCE_ALPHA_THRESHOLD);
     Some((vec![pixels], vec![0], w, h))
 }

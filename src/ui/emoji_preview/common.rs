@@ -1,5 +1,9 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use std::collections::VecDeque;
+
+pub const ALPHA_SHAPE_THRESHOLD: u8 = 24;
+pub const COLOR_SOURCE_ALPHA_THRESHOLD: u8 = 230;
 
 pub struct Texture<'a> {
     pub pixels: &'a [[u8; 4]],
@@ -28,7 +32,7 @@ impl Texture<'_> {
             for &y in &[0, h - 1] {
                 let idx = (y * w + x) as usize;
                 if let Some(&[pr, pg, pb, pa]) = self.pixels.get(idx) {
-                    if pa > 128 {
+                    if pa >= COLOR_SOURCE_ALPHA_THRESHOLD {
                         r += pr as u64;
                         g += pg as u64;
                         b += pb as u64;
@@ -41,12 +45,32 @@ impl Texture<'_> {
             for &x in &[0, w - 1] {
                 let idx = (y * w + x) as usize;
                 if let Some(&[pr, pg, pb, pa]) = self.pixels.get(idx) {
-                    if pa > 128 {
+                    if pa >= COLOR_SOURCE_ALPHA_THRESHOLD {
                         r += pr as u64;
                         g += pg as u64;
                         b += pb as u64;
                         count += 1;
                     }
+                }
+            }
+        }
+        if count == 0 {
+            for &[pr, pg, pb, pa] in self.pixels {
+                if pa >= COLOR_SOURCE_ALPHA_THRESHOLD {
+                    r += pr as u64;
+                    g += pg as u64;
+                    b += pb as u64;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            for &[pr, pg, pb, pa] in self.pixels {
+                if pa >= ALPHA_SHAPE_THRESHOLD {
+                    r += pr as u64;
+                    g += pg as u64;
+                    b += pb as u64;
+                    count += 1;
                 }
             }
         }
@@ -97,7 +121,12 @@ pub fn shadow_pass(fb: &mut [(u8, u8, u8)], hit_mask: &[bool], px_w: usize, px_h
     }
 }
 
-pub fn fb_to_lines(fb: &[(u8, u8, u8)], px_w: usize, px_h: usize, height: usize) -> Vec<Line<'static>> {
+pub fn fb_to_lines(
+    fb: &[(u8, u8, u8)],
+    px_w: usize,
+    px_h: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
     for row in 0..height {
         let top_y = row * 2;
@@ -149,4 +178,85 @@ pub fn specular(normal: [f64; 3], light: [f64; 3], power: f64) -> f64 {
 
 pub fn shade(channel: u8, brightness: f64, spec: f64) -> u8 {
     ((channel as f64 * brightness + spec * 255.0).min(255.0)) as u8
+}
+
+pub fn fill_transparent_rgb_from_nearest(
+    pixels: &mut [[u8; 4]],
+    width: u32,
+    height: u32,
+    alpha_threshold: u8,
+) {
+    if width == 0 || height == 0 || pixels.is_empty() {
+        return;
+    }
+
+    let w = width as usize;
+    let h = height as usize;
+    let original = pixels.to_vec();
+    let mut nearest = vec![usize::MAX; pixels.len()];
+    let mut queue = VecDeque::new();
+
+    for (idx, pixel) in original.iter().enumerate() {
+        if pixel[3] >= alpha_threshold {
+            nearest[idx] = idx;
+            queue.push_back(idx);
+        }
+    }
+
+    if queue.is_empty() && alpha_threshold > ALPHA_SHAPE_THRESHOLD {
+        fill_transparent_rgb_from_nearest(pixels, width, height, ALPHA_SHAPE_THRESHOLD);
+        return;
+    }
+
+    if queue.is_empty() {
+        return;
+    }
+
+    while let Some(idx) = queue.pop_front() {
+        let source = nearest[idx];
+        let x = idx % w;
+        let y = idx / w;
+
+        if x > 0 {
+            let next = idx - 1;
+            if nearest[next] == usize::MAX {
+                nearest[next] = source;
+                queue.push_back(next);
+            }
+        }
+        if x + 1 < w {
+            let next = idx + 1;
+            if nearest[next] == usize::MAX {
+                nearest[next] = source;
+                queue.push_back(next);
+            }
+        }
+        if y > 0 {
+            let next = idx - w;
+            if nearest[next] == usize::MAX {
+                nearest[next] = source;
+                queue.push_back(next);
+            }
+        }
+        if y + 1 < h {
+            let next = idx + w;
+            if nearest[next] == usize::MAX {
+                nearest[next] = source;
+                queue.push_back(next);
+            }
+        }
+    }
+
+    for (idx, pixel) in pixels.iter_mut().enumerate() {
+        if pixel[3] >= alpha_threshold {
+            continue;
+        }
+        let source = nearest[idx];
+        if source == usize::MAX {
+            continue;
+        }
+        pixel[0] = original[source][0];
+        pixel[1] = original[source][1];
+        pixel[2] = original[source][2];
+    }
 }

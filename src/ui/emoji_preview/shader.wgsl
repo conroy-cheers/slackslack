@@ -5,8 +5,8 @@ struct Uniforms {
     light_angle: f32,
     scale_x: f32,
     scale_y: f32,
-    _pad0: f32,
-    _pad1: f32,
+    debug_flags: u32,
+    _pad0: u32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -61,22 +61,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var diff_strength: f32;
 
     if in.face_type <= 1u {
-        // Front or back face — sample texture
-        base_color = textureSample(tex, tex_sampler, in.uv);
-        if base_color.a < 0.04 {
-            discard;
-        }
-        ambient = 0.35;
-        diff_strength = 0.65;
-    } else {
-        // Side face — sample nearest edge pixel; discard if transparent (follow contour)
         let sample = textureSample(tex, tex_sampler, in.uv);
-        if sample.a < 0.04 {
+        if sample.a < 0.094 {
             discard;
         }
         base_color = vec4f(sample.rgb, 1.0);
+        ambient = 0.35;
+        diff_strength = 0.65;
+    } else {
+        let sample = textureSample(tex, tex_sampler, in.uv);
+        base_color = vec4f(sample.rgb, 1.0);
         ambient = 0.25;
         diff_strength = 0.45;
+    }
+
+    if (u.debug_flags & 1u) != 0u {
+        base_color = vec4f(vec3f(1.0), base_color.a);
     }
 
     let ndotl = max(dot(n, light), 0.0);
