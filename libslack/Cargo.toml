@@ -1,0 +1,28 @@
+[package]
+name = "libslack"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async + transport
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-webpki-roots", "http2", "charset", "macos-system-configuration"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database + crypto
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+sha1 = "0.10"
+
+# Errors + logging
+anyhow = "1"
+tracing = "0.1"

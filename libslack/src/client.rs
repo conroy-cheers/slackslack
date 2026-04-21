@@ -1,9 +1,23 @@
 use crate::auth::Credentials;
-use crate::slack::types::*;
+use crate::realtime::{self, RealtimeEvent};
+use crate::types::*;
 use anyhow::{Result, bail};
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
+use tokio::sync::mpsc;
 
 pub trait SlackApi: Clone + Send + Sync + 'static {
+    fn conversations_list_all(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<Channel>>> + Send;
+    fn users_list(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> impl std::future::Future<Output = Result<UsersListData>> + Send;
+    fn emoji_list(&self) -> impl std::future::Future<Output = Result<EmojiListData>> + Send;
+    fn channel_sections_list(
+        &self,
+    ) -> impl std::future::Future<Output = Result<ChannelSectionsListData>> + Send;
     fn conversations_history(
         &self,
         channel: &str,
@@ -57,6 +71,10 @@ pub trait SlackApi: Clone + Send + Sync + 'static {
         filename: &str,
         data: Vec<u8>,
     ) -> impl std::future::Future<Output = Result<FilesCompleteUploadData>> + Send;
+    fn spawn_realtime(
+        &self,
+        tx: mpsc::UnboundedSender<RealtimeEvent>,
+    ) -> tokio::task::JoinHandle<()>;
 }
 
 #[derive(Clone)]
@@ -69,6 +87,10 @@ pub struct SlackClient {
 
 impl SlackClient {
     pub fn new(creds: &Credentials) -> Result<Self> {
+        Self::new_with_base_url(creds, "https://slack.com/api")
+    }
+
+    pub fn new_with_base_url(creds: &Credentials, base_url: &str) -> Result<Self> {
         let mut headers = HeaderMap::new();
         let cookie_val = format!("d={}", creds.cookie);
         headers.insert(COOKIE, HeaderValue::from_str(&cookie_val)?);
@@ -81,8 +103,12 @@ impl SlackClient {
             http,
             token: creds.token.clone(),
             cookie: creds.cookie.clone(),
-            base_url: "https://slack.com/api".to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
         })
+    }
+
+    pub fn cookie(&self) -> &str {
+        &self.cookie
     }
 
     async fn post<T: serde::de::DeserializeOwned>(
@@ -368,6 +394,22 @@ impl SlackClient {
 }
 
 impl SlackApi for SlackClient {
+    async fn conversations_list_all(&self) -> Result<Vec<Channel>> {
+        self.conversations_list_all().await
+    }
+
+    async fn users_list(&self, cursor: Option<&str>, limit: u32) -> Result<UsersListData> {
+        self.users_list(cursor, limit).await
+    }
+
+    async fn emoji_list(&self) -> Result<EmojiListData> {
+        self.emoji_list().await
+    }
+
+    async fn channel_sections_list(&self) -> Result<ChannelSectionsListData> {
+        self.channel_sections_list().await
+    }
+
     async fn conversations_history(
         &self,
         channel: &str,
@@ -439,5 +481,15 @@ impl SlackApi for SlackClient {
         data: Vec<u8>,
     ) -> Result<FilesCompleteUploadData> {
         self.files_upload(channel, thread_ts, filename, data).await
+    }
+
+    fn spawn_realtime(
+        &self,
+        tx: mpsc::UnboundedSender<RealtimeEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        let client = self.clone();
+        tokio::spawn(async move {
+            realtime::run_websocket(client, tx).await;
+        })
     }
 }

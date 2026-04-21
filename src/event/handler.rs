@@ -30,17 +30,6 @@ pub fn handle_event<C: SlackApi>(
             handle_ws_event(ws_event, state);
             HandleResult::Continue
         }
-        Event::WsPing(id) => {
-            if let Some(ref ws_tx) = state.ws_writer {
-                let msg = serde_json::json!({"id": id, "type": "ping"}).to_string();
-                let _ = ws_tx.send(msg);
-            }
-            HandleResult::Continue
-        }
-        Event::WsWriterReady(ws_tx) => {
-            state.ws_writer = Some(ws_tx);
-            HandleResult::Continue
-        }
         Event::ChannelsLoaded(channels) => {
             state.set_channels(channels);
             state.dirty = true;

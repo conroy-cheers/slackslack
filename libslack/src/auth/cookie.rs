@@ -94,3 +94,14 @@ fn decrypt_cookie(encrypted_value: &[u8], password: &[u8]) -> Result<String> {
         bail!("Decrypted value doesn't contain a valid Slack cookie")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::decrypt_cookie;
+
+    #[test]
+    fn decrypt_cookie_rejects_gibberish() {
+        let err = decrypt_cookie(b"not-a-real-cookie", b"peanuts").unwrap_err();
+        assert!(err.to_string().contains("AES decryption failed") || err.to_string().contains("valid Slack cookie"));
+    }
+}

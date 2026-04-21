@@ -69,3 +69,40 @@ fn extract_tokens_from_bytes(data: &[u8], tokens: &mut Vec<String>) {
 fn is_token_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-'
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_tokens_from_bytes, extract_token};
+
+    #[test]
+    fn finds_longest_token_in_binary_blob() {
+        let mut tokens = Vec::new();
+        extract_tokens_from_bytes(
+            b"junk xoxc-12345678901234567890123456789012345678901234567890 more xoxc-short",
+            &mut tokens,
+        );
+
+        assert_eq!(tokens.len(), 1);
+        assert!(tokens[0].starts_with("xoxc-1234567890"));
+    }
+
+    #[test]
+    fn extract_token_reads_leveldb_like_files() {
+        let base = std::env::temp_dir().join(format!(
+            "libslack-token-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("000001.log"),
+            b"prefix xoxc-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz",
+        )
+        .unwrap();
+
+        let token = extract_token(&base).unwrap();
+        assert!(token.starts_with("xoxc-"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

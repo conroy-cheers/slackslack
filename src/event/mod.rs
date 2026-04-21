@@ -1,8 +1,8 @@
 pub mod handler;
 
+use crate::slack::realtime::RealtimeEvent;
 use crate::slack::types::WsEvent;
 use crossterm::event::KeyEvent;
-use tokio::sync::mpsc;
 
 pub enum Event {
     // Terminal
@@ -14,10 +14,6 @@ pub enum Event {
     SlackConnected { self_id: String, team: String },
     SlackDisconnected,
     SlackWsEvent(WsEvent),
-
-    // WebSocket plumbing
-    WsPing(u64),
-    WsWriterReady(mpsc::UnboundedSender<String>),
 
     // API results
     ChannelsLoaded(Vec<crate::slack::types::Channel>),
@@ -91,4 +87,15 @@ pub enum Event {
 
     // Internal
     Tick,
+}
+
+impl From<RealtimeEvent> for Event {
+    fn from(value: RealtimeEvent) -> Self {
+        match value {
+            RealtimeEvent::Connected { self_id, team } => Self::SlackConnected { self_id, team },
+            RealtimeEvent::Disconnected => Self::SlackDisconnected,
+            RealtimeEvent::WsEvent(event) => Self::SlackWsEvent(event),
+            RealtimeEvent::ApiError(err) => Self::ApiError(err),
+        }
+    }
 }

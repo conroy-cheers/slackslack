@@ -1,8 +1,10 @@
 use crate::slack::client::SlackApi;
+use crate::slack::realtime::RealtimeEvent;
 use crate::slack::types::*;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum ApiCall {
@@ -95,6 +97,30 @@ impl MockSlackClient {
 }
 
 impl SlackApi for MockSlackClient {
+    fn conversations_list_all(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<Channel>>> + Send {
+        async { Ok(Vec::new()) }
+    }
+
+    fn users_list(
+        &self,
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> impl std::future::Future<Output = Result<UsersListData>> + Send {
+        async { Ok(UsersListData::default()) }
+    }
+
+    fn emoji_list(&self) -> impl std::future::Future<Output = Result<EmojiListData>> + Send {
+        async { Ok(EmojiListData::default()) }
+    }
+
+    fn channel_sections_list(
+        &self,
+    ) -> impl std::future::Future<Output = Result<ChannelSectionsListData>> + Send {
+        async { Ok(ChannelSectionsListData::default()) }
+    }
+
     fn conversations_history(
         &self,
         channel: &str,
@@ -246,5 +272,12 @@ impl SlackApi for MockSlackClient {
             thread_ts: thread_ts.map(|s| s.to_string()),
         });
         async { Ok(FilesCompleteUploadData::default()) }
+    }
+
+    fn spawn_realtime(
+        &self,
+        _tx: mpsc::UnboundedSender<RealtimeEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
     }
 }

@@ -1,8 +1,8 @@
 use crate::cache::{DiskCache, load_standard_emoji_cache};
 use crate::event::handler::{HandleResult, handle_event};
 use crate::event::Event;
-use crate::slack::client::SlackClient;
-use crate::slack::websocket;
+use crate::slack::client::SlackApi;
+use crate::slack::realtime::RealtimeEvent;
 use crate::state::AppState;
 use crate::ui;
 use anyhow::Result;
@@ -11,16 +11,16 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-pub struct App {
+pub struct App<C: SlackApi> {
     state: AppState,
-    client: SlackClient,
+    client: C,
     event_tx: mpsc::UnboundedSender<Event>,
     event_rx: mpsc::UnboundedReceiver<Event>,
     team_id: String,
 }
 
-impl App {
-    pub fn new(client: SlackClient, team_id: &str) -> Self {
+impl<C: SlackApi> App<C> {
+    pub fn new(client: C, team_id: &str) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut state = AppState::new();
         state.team_id = team_id.to_string();
@@ -104,7 +104,16 @@ impl App {
         let ws_client = self.client.clone();
         let ws_tx = self.event_tx.clone();
         tokio::spawn(async move {
-            websocket::run_websocket(ws_client, ws_tx).await;
+            let (rt_tx, mut rt_rx) = mpsc::unbounded_channel::<RealtimeEvent>();
+            let bridge_tx = ws_tx.clone();
+            let realtime_task = ws_client.spawn_realtime(rt_tx);
+
+            while let Some(event) = rt_rx.recv().await {
+                if bridge_tx.send(event.into()).is_err() {
+                    realtime_task.abort();
+                    break;
+                }
+            }
         });
 
         // Load fresh data from API (replaces cache data when it arrives)

@@ -1991,6 +1991,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "libslack"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "cbc",
+ "futures-util",
+ "pbkdf2",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3709,33 +3728,26 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "slackslack"
 version = "0.1.0"
 dependencies = [
- "aes",
  "anyhow",
  "base64",
  "bytemuck",
- "cbc",
  "chrono",
  "contour",
  "crossterm",
  "earcutr",
  "futures-util",
- "hmac",
  "image",
  "libc",
+ "libslack",
  "notify-rust",
- "pbkdf2",
  "pollster",
  "ratatui",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
- "sha1",
  "shellexpand",
  "softbuffer",
- "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "unicode-width 0.2.2",

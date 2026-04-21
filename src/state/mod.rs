@@ -4,7 +4,6 @@ use crate::slack::types::{Channel, Message, User};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
-use tokio::sync::mpsc;
 
 pub struct ChannelData {
     pub messages: VecDeque<Message>,
@@ -280,8 +279,6 @@ pub struct AppState {
     pub dirty: bool,
     pub last_error: Option<String>,
 
-    // WebSocket writer
-    pub ws_writer: Option<mpsc::UnboundedSender<String>>,
 }
 
 /// Cached image data ready for kitty protocol display.
@@ -465,7 +462,6 @@ impl AppState {
             focus: Focus::ChannelList,
             dirty: true,
             last_error: None,
-            ws_writer: None,
         }
     }
 
