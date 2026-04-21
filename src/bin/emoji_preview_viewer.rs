@@ -450,14 +450,12 @@ impl ApplicationHandler for ViewerApp {
                     if event.logical_key == Key::Named(NamedKey::Escape) {
                         event_loop.exit();
                     } else if let Some(viewer) = &mut self.viewer {
-                        match &event.logical_key {
-                            Key::Character(ch) if ch.eq_ignore_ascii_case("w") => {
-                                viewer.toggle_wireframe();
+                        if let Some(text) = &event.text {
+                            match text.as_str() {
+                                "w" => viewer.toggle_wireframe(),
+                                "b" => viewer.toggle_all_white(),
+                                _ => {}
                             }
-                            Key::Character(ch) if ch.eq_ignore_ascii_case("b") => {
-                                viewer.toggle_all_white();
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -1264,7 +1262,7 @@ fn perf_overlay_lines(overlay: &PerfOverlay<'_>) -> Vec<String> {
             "WHITE {}",
             if overlay.show_all_white { "ON" } else { "OFF" }
         ),
-        "W wireframe  B white".to_string(),
+        "w wireframe  b white".to_string(),
         format!("#{}", overlay.frame_count),
     ]
 }

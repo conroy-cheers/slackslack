@@ -43,7 +43,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let nz = in.normal.x * sin_r + in.normal.z * cos_r;
 
     var out: VertexOutput;
-    out.position = vec4f(rx * u.scale_x, -ry * u.scale_y, rz * 0.001 + 0.5, 1.0);
+    out.position = vec4f(rx * u.scale_x, -ry * u.scale_y, -rz * 0.001 + 0.5, 1.0);
     out.normal = vec3f(nx, in.normal.y, nz);
     out.uv = in.uv;
     out.face_type = in.face_type;

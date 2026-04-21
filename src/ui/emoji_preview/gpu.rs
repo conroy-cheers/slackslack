@@ -1,7 +1,5 @@
 use anyhow::{Result, anyhow};
 use ratatui::text::Line;
-use std::cmp::Ordering;
-use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 use super::common::*;
@@ -662,11 +660,17 @@ impl GpuRenderer {
     }
 
     fn ensure_texture(&mut self, texture: &Texture) {
-        let rgba_data: Vec<u8> = texture
+        let threshold = ALPHA_SHAPE_THRESHOLD;
+        let mut rgba_data: Vec<u8> = texture
             .pixels
             .iter()
             .flat_map(|p| p.iter().copied())
             .collect();
+        for chunk in rgba_data.chunks_exact_mut(4) {
+            if chunk[3] >= threshold {
+                chunk[3] = 255;
+            }
+        }
 
         let same_size = self
             .tex_state
@@ -931,126 +935,188 @@ fn billboard_geometry_rect(
 fn extruded_billboard_geometry(
     texture: &Texture,
     depth_ratio: f32,
-    mirror_back_face: bool,
+    _mirror_back_face: bool,
 ) -> (Vec<Vertex>, Vec<u16>) {
     let aspect = if texture.height > 0 {
         texture.width as f32 / texture.height as f32
     } else {
         1.0
     };
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+
+    if texture.width == 0 || texture.height == 0 {
+        return billboard_geometry_rect(aspect, depth_ratio, true);
+    }
 
     let hw = 1.0f32;
     let hh = 1.0 / aspect.max(0.0001);
     let hd = hw * depth_ratio;
 
-    let max_cells = 256usize;
-    let (grid_w, grid_h) = match (
-        texture.width.cmp(&texture.height),
-        texture.width,
-        texture.height,
-    ) {
-        (_, 0, _) | (_, _, 0) => return (vertices, indices),
-        (Ordering::Greater | Ordering::Equal, w, h) => (
-            max_cells,
-            ((h as f32 / w as f32) * max_cells as f32)
-                .round()
-                .clamp(1.0, max_cells as f32) as usize,
-        ),
-        (Ordering::Less, w, h) => (
-            ((w as f32 / h as f32) * max_cells as f32)
-                .round()
-                .clamp(1.0, max_cells as f32) as usize,
-            max_cells,
-        ),
+    let max_cells = 32usize;
+    let (grid_w, grid_h) = if texture.width >= texture.height {
+        let gh = ((texture.height as f32 / texture.width as f32) * max_cells as f32)
+            .round()
+            .clamp(1.0, max_cells as f32) as usize;
+        (max_cells, gh)
+    } else {
+        let gw = ((texture.width as f32 / texture.height as f32) * max_cells as f32)
+            .round()
+            .clamp(1.0, max_cells as f32) as usize;
+        (gw, max_cells)
     };
 
-    let occupied = alpha_occupancy_grid(texture, grid_w, grid_h);
-    if !occupied.iter().any(|&filled| filled) {
-        return billboard_geometry_rect(aspect, depth_ratio, mirror_back_face);
+    let cols = grid_w + 1;
+    let rows = grid_h + 1;
+    let field = alpha_field(texture, cols, rows);
+
+    let threshold = ALPHA_SHAPE_THRESHOLD as f64 / 255.0;
+    let field_f64: Vec<f64> = field.iter().map(|&v| v as f64).collect();
+
+    let builder = contour::ContourBuilder::new(cols, rows, true)
+        .x_step(1.0 / grid_w as f64)
+        .y_step(1.0 / grid_h as f64);
+
+    let contours = match builder.contours(&field_f64, &[threshold]) {
+        Ok(c) => c,
+        Err(_) => return billboard_geometry_rect(aspect, depth_ratio, true),
+    };
+
+    if contours.is_empty() {
+        return billboard_geometry_rect(aspect, depth_ratio, true);
     }
 
-    let loops = extract_boundary_loops(&occupied, grid_w, grid_h);
-    if loops.is_empty() {
-        return billboard_geometry_rect(aspect, depth_ratio, mirror_back_face);
+    let multi_polygon = contours.into_iter().next().unwrap().into_inner().0;
+    if multi_polygon.0.is_empty() {
+        return billboard_geometry_rect(aspect, depth_ratio, true);
     }
 
-    let x_for = |gx: usize| -hw + (gx as f32 / grid_w as f32) * (2.0 * hw);
-    let y_for = |gy: usize| hh - (gy as f32 / grid_h as f32) * (2.0 * hh);
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
     let texel_u = 0.5 / texture.width.max(1) as f32;
     let texel_v = 0.5 / texture.height.max(1) as f32;
 
-    for loop_points in loops {
-        let simplified = simplify_collinear(&loop_points);
-        if simplified.len() < 3 {
+    for polygon in &multi_polygon.0 {
+        let exterior = polygon.exterior();
+        let ext_coords = exterior.coords().collect::<Vec<_>>();
+        if ext_coords.len() < 4 {
             continue;
         }
 
-        let contour2d: Vec<[f32; 2]> = simplified
-            .iter()
-            .map(|p| [x_for(p.x as usize), y_for(p.y as usize)])
-            .collect();
-        let mut contour = simplified.clone();
-        if signed_area(&contour2d) < 0.0 {
-            contour.reverse();
+        // Build flat coordinate array for earcutr: exterior + holes
+        let mut flat_coords: Vec<f64> = Vec::new();
+        let mut hole_indices: Vec<usize> = Vec::new();
+
+        // Exterior ring (skip the closing duplicate point)
+        let ext_len = ext_coords.len() - 1;
+        for &coord in &ext_coords[..ext_len] {
+            flat_coords.push(coord.x);
+            flat_coords.push(coord.y);
         }
-        let contour2d: Vec<[f32; 2]> = contour
-            .iter()
-            .map(|p| [x_for(p.x as usize), y_for(p.y as usize)])
+
+        // Interior rings (holes)
+        for interior in polygon.interiors() {
+            let hole_coords: Vec<_> = interior.coords().collect();
+            if hole_coords.len() < 4 {
+                continue;
+            }
+            hole_indices.push(flat_coords.len() / 2);
+            let hole_len = hole_coords.len() - 1;
+            for &coord in &hole_coords[..hole_len] {
+                flat_coords.push(coord.x);
+                flat_coords.push(coord.y);
+            }
+        }
+
+        let n_verts = flat_coords.len() / 2;
+        if n_verts < 3 {
+            continue;
+        }
+
+        let tri_indices = match earcutr::earcut(&flat_coords, &hole_indices, 2) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // Build UV and position arrays from flat coords
+        // contour crate outputs coordinates in [0, 1] UV space (due to x_step/y_step)
+        let uv_points: Vec<[f32; 2]> = (0..n_verts)
+            .map(|i| {
+                [
+                    flat_coords[i * 2] as f32,
+                    flat_coords[i * 2 + 1] as f32,
+                ]
+            })
             .collect();
 
+        let pos_points: Vec<[f32; 2]> = uv_points
+            .iter()
+            .map(|&[u, v]| [-hw + u * 2.0 * hw, hh - v * 2.0 * hh])
+            .collect();
+
+        // Front cap (z = +hd, face_type = 0)
         emit_cap(
             &mut vertices,
             &mut indices,
-            &contour,
-            &contour2d,
-            grid_w,
-            grid_h,
+            &uv_points,
+            &pos_points,
+            &tri_indices,
+            texel_u,
+            texel_v,
             hd,
             false,
             false,
         );
+
+        // Back cap (z = -hd, face_type = 1, flipped winding)
+        // No UV mirror — the Y-axis rotation already mirrors the view naturally
         emit_cap(
             &mut vertices,
             &mut indices,
-            &contour,
-            &contour2d,
-            grid_w,
-            grid_h,
+            &uv_points,
+            &pos_points,
+            &tri_indices,
+            texel_u,
+            texel_v,
             -hd,
             true,
             false,
         );
 
-        for i in 0..contour.len() {
-            let a = contour[i];
-            let b = contour[(i + 1) % contour.len()];
-            let ax = x_for(a.x as usize);
-            let ay = y_for(a.y as usize);
-            let bx = x_for(b.x as usize);
-            let by = y_for(b.y as usize);
+        // Side walls along exterior ring
+        emit_side_walls(
+            &mut vertices,
+            &mut indices,
+            &uv_points[..ext_len],
+            &pos_points[..ext_len],
+            texel_u,
+            texel_v,
+            hd,
+        );
 
-            let normal = normalize([(by - ay) as f64, -(bx - ax) as f64, 0.0]);
-
-            let au = (a.x as f32 / grid_w as f32).clamp(texel_u, 1.0 - texel_u);
-            let av = (a.y as f32 / grid_h as f32).clamp(texel_v, 1.0 - texel_v);
-            let bu = (b.x as f32 / grid_w as f32).clamp(texel_u, 1.0 - texel_u);
-            let bv = (b.y as f32 / grid_h as f32).clamp(texel_v, 1.0 - texel_v);
-
-            push_quad(
+        // Side walls along each hole (wound opposite direction for inward-facing normals)
+        let mut hole_start = ext_len;
+        for interior in polygon.interiors() {
+            let hole_coords: Vec<_> = interior.coords().collect();
+            if hole_coords.len() < 4 {
+                continue;
+            }
+            let hole_len = hole_coords.len() - 1;
+            let hole_end = hole_start + hole_len;
+            emit_side_walls(
                 &mut vertices,
                 &mut indices,
-                [[ax, ay, -hd], [ax, ay, hd], [bx, by, hd], [bx, by, -hd]],
-                [normal[0] as f32, normal[1] as f32, 0.0],
-                [[au, av], [au, av], [bu, bv], [bu, bv]],
-                2,
+                &uv_points[hole_start..hole_end],
+                &pos_points[hole_start..hole_end],
+                texel_u,
+                texel_v,
+                hd,
             );
+            hole_start = hole_end;
         }
     }
 
     if indices.is_empty() {
-        billboard_geometry_rect(aspect, depth_ratio, mirror_back_face)
+        billboard_geometry_rect(aspect, depth_ratio, true)
     } else {
         (vertices, indices)
     }
@@ -1077,196 +1143,92 @@ fn push_quad(
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct GridPoint {
-    x: u16,
-    y: u16,
-}
-
-fn extract_boundary_loops(occupied: &[bool], grid_w: usize, grid_h: usize) -> Vec<Vec<GridPoint>> {
-    let mut next: HashMap<GridPoint, GridPoint> = HashMap::new();
-    let gp = |x: usize, y: usize| GridPoint {
-        x: x as u16,
-        y: y as u16,
-    };
-
-    for y in 0..grid_h {
-        for x in 0..grid_w {
-            if !occupied[y * grid_w + x] {
-                continue;
-            }
-            let top_empty = y == 0 || !occupied[(y - 1) * grid_w + x];
-            if top_empty {
-                next.insert(gp(x, y), gp(x + 1, y));
-            }
-            let right_empty = x + 1 == grid_w || !occupied[y * grid_w + (x + 1)];
-            if right_empty {
-                next.insert(gp(x + 1, y), gp(x + 1, y + 1));
-            }
-            let bottom_empty = y + 1 == grid_h || !occupied[(y + 1) * grid_w + x];
-            if bottom_empty {
-                next.insert(gp(x + 1, y + 1), gp(x, y + 1));
-            }
-            let left_empty = x == 0 || !occupied[y * grid_w + (x - 1)];
-            if left_empty {
-                next.insert(gp(x, y + 1), gp(x, y));
-            }
-        }
-    }
-
-    let mut visited: HashMap<GridPoint, bool> = HashMap::new();
-    let mut loops = Vec::new();
-    for &start in next.keys() {
-        if visited.get(&start).copied().unwrap_or(false) {
-            continue;
-        }
-        let mut loop_points = Vec::new();
-        let mut current = start;
-        loop {
-            if visited.get(&current).copied().unwrap_or(false) {
-                break;
-            }
-            visited.insert(current, true);
-            loop_points.push(current);
-            let Some(&next_point) = next.get(&current) else {
-                break;
-            };
-            current = next_point;
-            if current == start {
-                break;
-            }
-        }
-        if loop_points.len() >= 3 {
-            loops.push(loop_points);
-        }
-    }
-    loops
-}
-
-fn simplify_collinear(points: &[GridPoint]) -> Vec<GridPoint> {
-    if points.len() < 3 {
-        return points.to_vec();
-    }
-    let mut out = Vec::new();
-    for i in 0..points.len() {
-        let prev = points[(i + points.len() - 1) % points.len()];
-        let curr = points[i];
-        let next = points[(i + 1) % points.len()];
-        let dx1 = curr.x as i32 - prev.x as i32;
-        let dy1 = curr.y as i32 - prev.y as i32;
-        let dx2 = next.x as i32 - curr.x as i32;
-        let dy2 = next.y as i32 - curr.y as i32;
-        if dx1 * dy2 != dy1 * dx2 {
-            out.push(curr);
-        }
-    }
-    out
-}
-
-fn signed_area(points: &[[f32; 2]]) -> f32 {
-    let mut area = 0.0f32;
-    for i in 0..points.len() {
-        let a = points[i];
-        let b = points[(i + 1) % points.len()];
-        area += a[0] * b[1] - b[0] * a[1];
-    }
-    area * 0.5
-}
-
 fn emit_cap(
     vertices: &mut Vec<Vertex>,
     indices: &mut Vec<u16>,
-    contour: &[GridPoint],
-    contour2d: &[[f32; 2]],
-    grid_w: usize,
-    grid_h: usize,
+    uv_points: &[[f32; 2]],
+    pos_points: &[[f32; 2]],
+    tri_indices: &[usize],
+    texel_u: f32,
+    texel_v: f32,
     z: f32,
     flip_winding: bool,
     mirror_u: bool,
 ) {
     let base = vertices.len() as u16;
-    for (grid, pos2) in contour.iter().zip(contour2d.iter()) {
-        let mut u = grid.x as f32 / grid_w as f32;
-        if mirror_u {
-            u = 1.0 - u;
-        }
-        let v = grid.y as f32 / grid_h as f32;
+    let face_type = if z >= 0.0 { 0u32 } else { 1 };
+    let nz = if z >= 0.0 { 1.0f32 } else { -1.0 };
+
+    for (&[u, v], &[px, py]) in uv_points.iter().zip(pos_points.iter()) {
+        let u_final = if mirror_u { 1.0 - u } else { u }.clamp(texel_u, 1.0 - texel_u);
+        let v_final = v.clamp(texel_v, 1.0 - texel_v);
         vertices.push(Vertex {
-            position: [pos2[0], pos2[1], z],
-            normal: [0.0, 0.0, if z >= 0.0 { 1.0 } else { -1.0 }],
-            uv: [u, v],
-            face_type: if z >= 0.0 { 0 } else { 1 },
+            position: [px, py, z],
+            normal: [0.0, 0.0, nz],
+            uv: [u_final, v_final],
+            face_type,
             _pad: 0,
         });
     }
 
-    for tri in triangulate_polygon(contour2d) {
+    for tri in tri_indices.chunks_exact(3) {
+        let (a, b, c) = (tri[0] as u16, tri[1] as u16, tri[2] as u16);
         if flip_winding {
-            indices.extend_from_slice(&[
-                base + tri[0] as u16,
-                base + tri[2] as u16,
-                base + tri[1] as u16,
-            ]);
+            indices.extend_from_slice(&[base + a, base + c, base + b]);
         } else {
-            indices.extend_from_slice(&[
-                base + tri[0] as u16,
-                base + tri[1] as u16,
-                base + tri[2] as u16,
-            ]);
+            indices.extend_from_slice(&[base + a, base + b, base + c]);
         }
     }
 }
 
-fn triangulate_polygon(points: &[[f32; 2]]) -> Vec<[usize; 3]> {
-    let mut remaining: Vec<usize> = (0..points.len()).collect();
-    let mut tris = Vec::new();
-    while remaining.len() > 2 {
-        let len = remaining.len();
-        let mut ear_found = false;
-        for i in 0..len {
-            let prev = remaining[(i + len - 1) % len];
-            let curr = remaining[i];
-            let next = remaining[(i + 1) % len];
-            let a = points[prev];
-            let b = points[curr];
-            let c = points[next];
-            if cross2(a, b, c) <= 0.0 {
-                continue;
-            }
-            let mut contains = false;
-            for &idx in &remaining {
-                if idx == prev || idx == curr || idx == next {
-                    continue;
-                }
-                if point_in_triangle(points[idx], a, b, c) {
-                    contains = true;
-                    break;
-                }
-            }
-            if contains {
-                continue;
-            }
-            tris.push([prev, curr, next]);
-            remaining.remove(i);
-            ear_found = true;
-            break;
-        }
-        if !ear_found {
-            break;
+fn emit_side_walls(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u16>,
+    uv_ring: &[[f32; 2]],
+    pos_ring: &[[f32; 2]],
+    texel_u: f32,
+    texel_v: f32,
+    hd: f32,
+) {
+    let n = uv_ring.len();
+    if n < 2 {
+        return;
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let [au, av] = uv_ring[i];
+        let [bu, bv] = uv_ring[j];
+        let [ax, ay] = pos_ring[i];
+        let [bx, by] = pos_ring[j];
+
+        let normal = normalize([(by - ay) as f64, -(bx - ax) as f64, 0.0]);
+
+        let au_c = au.clamp(texel_u, 1.0 - texel_u);
+        let av_c = av.clamp(texel_v, 1.0 - texel_v);
+        let bu_c = bu.clamp(texel_u, 1.0 - texel_u);
+        let bv_c = bv.clamp(texel_v, 1.0 - texel_v);
+
+        push_quad(
+            vertices,
+            indices,
+            [[ax, ay, -hd], [ax, ay, hd], [bx, by, hd], [bx, by, -hd]],
+            [normal[0] as f32, normal[1] as f32, 0.0],
+            [[au_c, av_c], [au_c, av_c], [bu_c, bv_c], [bu_c, bv_c]],
+            2,
+        );
+    }
+}
+
+fn alpha_field(texture: &Texture, cols: usize, rows: usize) -> Vec<f32> {
+    let mut field = vec![0.0f32; cols * rows];
+    for gy in 0..rows {
+        let v = gy as f64 / (rows - 1).max(1) as f64;
+        for gx in 0..cols {
+            let u = gx as f64 / (cols - 1).max(1) as f64;
+            field[gy * cols + gx] = texture.sample(u, v)[3] as f32 / 255.0;
         }
     }
-    tris
-}
-
-fn cross2(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
-    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-}
-
-fn point_in_triangle(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> bool {
-    let c1 = cross2(a, b, p);
-    let c2 = cross2(b, c, p);
-    let c3 = cross2(c, a, p);
-    (c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0)
+    field
 }
 
 #[cfg(test)]
@@ -1289,61 +1251,102 @@ mod tests {
     }
 
     #[test]
-    fn extruded_geometry_avoids_outer_rect_for_padded_alpha() {
+    fn geometry_trims_to_opaque_content() {
         let texture = padded_texture();
         let (vertices, _) = extruded_billboard_geometry(&texture, 0.1, true);
-        let min_x = vertices
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::INFINITY, f32::min);
-        let max_x = vertices
-            .iter()
-            .map(|v| v.position[0])
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_y = vertices
-            .iter()
-            .map(|v| v.position[1])
-            .fold(f32::INFINITY, f32::min);
-        let max_y = vertices
-            .iter()
-            .map(|v| v.position[1])
-            .fold(f32::NEG_INFINITY, f32::max);
+        let min_x = vertices.iter().map(|v| v.position[0]).fold(f32::INFINITY, f32::min);
+        let max_x = vertices.iter().map(|v| v.position[0]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = vertices.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
+        let max_y = vertices.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
 
         assert!(
             min_x > -0.7 && max_x < 0.7,
-            "outer rectangular side walls should be gone"
+            "side walls should be trimmed to opaque region, got {min_x}..{max_x}"
         );
         assert!(
             min_y > -0.7 && max_y < 0.7,
-            "outer rectangular side walls should be gone"
+            "top/bottom should be trimmed to opaque region, got {min_y}..{max_y}"
         );
     }
-}
 
-fn alpha_occupancy_grid(texture: &Texture, grid_w: usize, grid_h: usize) -> Vec<bool> {
-    let mut grid = vec![false; grid_w * grid_h];
-    let samples_per_axis = 3usize;
-    let coverage_threshold = 0.35f32;
-    for y in 0..grid_h {
-        for x in 0..grid_w {
-            let mut covered = 0usize;
-            let mut total = 0usize;
-            for sy in 0..samples_per_axis {
-                for sx in 0..samples_per_axis {
-                    let u =
-                        (x as f64 + (sx as f64 + 0.5) / samples_per_axis as f64) / grid_w as f64;
-                    let v =
-                        (y as f64 + (sy as f64 + 0.5) / samples_per_axis as f64) / grid_h as f64;
-                    let alpha = texture.sample(u, v)[3];
-                    if alpha >= ALPHA_SHAPE_THRESHOLD {
-                        covered += 1;
-                    }
-                    total += 1;
+    #[test]
+    fn extruded_geometry_has_front_back_caps_and_sides() {
+        let texture = padded_texture();
+        let (vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
+        assert!(!indices.is_empty(), "should produce geometry");
+
+        let count = |ft: u32| {
+            indices
+                .chunks(3)
+                .filter(|tri| tri.iter().all(|&i| vertices[i as usize].face_type == ft))
+                .count()
+        };
+        let front = count(0);
+        let back = count(1);
+        let sides = count(2);
+
+        eprintln!("front: {front}, back: {back}, sides: {sides}, total: {}", indices.len() / 3);
+        assert!(front > 0, "must have front cap triangles");
+        assert!(back > 0, "must have back cap triangles");
+        assert!(sides > 0, "must have side wall triangles");
+        assert_eq!(front, back, "front and back should have equal triangle count");
+    }
+
+    #[test]
+    fn front_cap_uvs_in_opaque_region() {
+        let texture = padded_texture();
+        let (vertices, _) = extruded_billboard_geometry(&texture, 0.1, true);
+        let front_verts: Vec<_> = vertices.iter().filter(|v| v.face_type == 0).collect();
+        assert!(!front_verts.is_empty());
+
+        let min_u = front_verts.iter().map(|v| v.uv[0]).fold(f32::INFINITY, f32::min);
+        let max_u = front_verts.iter().map(|v| v.uv[0]).fold(f32::NEG_INFINITY, f32::max);
+
+        assert!(
+            min_u > 0.1 && max_u < 0.9,
+            "front cap UVs should be trimmed to opaque region; got u=[{min_u}, {max_u}]"
+        );
+    }
+
+    #[test]
+    fn circle_has_diagonal_side_normals() {
+        let mut pixels = vec![[0, 0, 0, 0]; 32 * 32];
+        for y in 0..32 {
+            for x in 0..32 {
+                let dx = x as f32 - 15.5;
+                let dy = y as f32 - 15.5;
+                if dx * dx + dy * dy < 12.0 * 12.0 {
+                    pixels[y * 32 + x] = [255, 0, 0, 255];
                 }
             }
-            let coverage = covered as f32 / total as f32;
-            grid[y * grid_w + x] = coverage >= coverage_threshold;
         }
+        let leaked = Box::leak(pixels.into_boxed_slice());
+        let texture = Texture { pixels: leaked, width: 32, height: 32 };
+        let (vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
+        assert!(!indices.is_empty());
+
+        let has_diagonal = vertices
+            .iter()
+            .filter(|v| v.face_type == 2)
+            .any(|v| v.normal[0].abs() > 0.01 && v.normal[1].abs() > 0.01);
+        assert!(has_diagonal, "circle should have diagonal side-wall normals");
     }
-    grid
+
+    #[test]
+    fn fully_opaque_falls_back_to_rect() {
+        let pixels = vec![[255, 0, 0, 255]; 16 * 16];
+        let leaked = Box::leak(pixels.into_boxed_slice());
+        let texture = Texture { pixels: leaked, width: 16, height: 16 };
+        let (_vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
+        assert!(!indices.is_empty(), "fully opaque should produce rect fallback geometry");
+    }
+
+    #[test]
+    fn fully_transparent_falls_back_to_rect() {
+        let pixels = vec![[0, 0, 0, 0]; 16 * 16];
+        let leaked = Box::leak(pixels.into_boxed_slice());
+        let texture = Texture { pixels: leaked, width: 16, height: 16 };
+        let (_vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
+        assert!(!indices.is_empty(), "fully transparent should produce rect fallback geometry");
+    }
 }

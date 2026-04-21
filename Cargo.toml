@@ -43,6 +43,8 @@ libc = "0.2"
 wgpu = "24"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+contour = "0.13"
+earcutr = "0.5"
 winit = "0.30"
 softbuffer = "0.4"
 
