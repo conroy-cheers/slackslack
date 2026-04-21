@@ -184,6 +184,7 @@ pub fn handle_event<C: SlackApi>(
         }
         Event::EmojiPreviewImageLoaded { frames, frame_delays, width, height } => {
             state.emoji_preview_pending = false;
+            state.emoji_preview_tick = 0;
             state.emoji_preview_frames = frames;
             state.emoji_preview_frame_delays = frame_delays;
             state.emoji_preview_tex_w = width;
@@ -1149,21 +1150,26 @@ fn handle_emoji_picker_key<C: SlackApi>(
 
                 if is_custom {
                     if let Some(key) = state.resolve_emoji_key(&name) {
-                        if let Some(cached) = state.custom_emoji_images.get(&key) {
-                            // Use cached PNG — decode frames from it
+                        let has_cached = if let Some(cached) = state.custom_emoji_images.get(&key) {
                             if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&cached.png_data) {
                                 state.emoji_preview_frames = frames;
                                 state.emoji_preview_frame_delays = delays;
                                 state.emoji_preview_tex_w = w;
                                 state.emoji_preview_tex_h = h;
-                            } else {
-                                // Try fetching original (might be animated GIF)
-                                state.emoji_preview_pending = true;
-                                spawn_download_emoji_preview(client, &key, event_tx);
                             }
+                            true
                         } else {
+                            false
+                        };
+                        if !has_cached {
                             state.emoji_preview_pending = true;
-                            spawn_download_emoji_preview(client, &key, event_tx);
+                        }
+                        // Always download the original — cached PNG is a static
+                        // rasterization that drops animation frames.
+                        if let Some(url) = state.custom_emoji.get(&key).cloned() {
+                            if !url.starts_with("alias:") {
+                                spawn_download_emoji_preview_url(&url, event_tx);
+                            }
                         }
                     }
                 } else {

@@ -54,19 +54,34 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     }
 
     let frame_idx = current_frame_index(state);
-    let tex = Texture {
-        pixels: &state.emoji_preview_frames[frame_idx],
-        width: state.emoji_preview_tex_w,
-        height: state.emoji_preview_tex_h,
-    };
-
     let w = inner.width as usize;
     let h = inner.height as usize;
     let tick = state.emoji_preview_tick;
 
     let lines = match &mut state.billboard_renderer {
-        BillboardRenderer::Gpu(gpu) => gpu.render_billboard(&tex, w, h, tick),
-        BillboardRenderer::Cpu => cpu::render_billboard(&tex, w, h, tick),
+        BillboardRenderer::Gpu(gpu) => {
+            gpu.load_frames(
+                &state.emoji_preview_frames,
+                state.emoji_preview_tex_w,
+                state.emoji_preview_tex_h,
+            );
+            gpu.render_billboard(
+                frame_idx,
+                state.emoji_preview_tex_w,
+                state.emoji_preview_tex_h,
+                w,
+                h,
+                tick,
+            )
+        }
+        BillboardRenderer::Cpu => {
+            let tex = Texture {
+                pixels: &state.emoji_preview_frames[frame_idx],
+                width: state.emoji_preview_tex_w,
+                height: state.emoji_preview_tex_h,
+            };
+            cpu::render_billboard(&tex, w, h, tick)
+        }
     };
 
     let paragraph = Paragraph::new(lines);

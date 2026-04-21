@@ -367,7 +367,7 @@ fn configure_event_loop(builder: &mut EventLoopBuilder<()>, choice: BackendChoic
     }
 }
 
-const NUM_SLIDERS: usize = 12;
+const NUM_SLIDERS: usize = 13;
 
 struct SliderState {
     active: usize,
@@ -383,6 +383,7 @@ struct SliderState {
     ssao_start_dist: f32,
     ssao_step_growth: f32,
     ssao_max_shadow: f32,
+    render_scale: f32,
     bg_color: Option<[f32; 3]>,
 }
 
@@ -397,11 +398,12 @@ impl SliderState {
             light_distance: 4.8,
             ground_y: -1.15,
             contrast: 1.15,
-            ssao_strength: 0.55,
-            ssao_depth_thresh: 0.01,
-            ssao_start_dist: 1.5,
-            ssao_step_growth: 1.12,
-            ssao_max_shadow: 0.45,
+            ssao_strength: 10.0,
+            ssao_depth_thresh: 0.0,
+            ssao_start_dist: 0.1,
+            ssao_step_growth: 1.20,
+            ssao_max_shadow: 0.4,
+            render_scale: 1.0,
             bg_color,
         }
     }
@@ -415,12 +417,13 @@ impl SliderState {
             ("LIGHT EL", self.light_elevation, 0.1, 1.4, 0.02),
             ("LIGHT DIST", self.light_distance, 1.0, 8.0, 0.1),
             ("GROUND Y", self.ground_y, -3.0, -0.5, 0.05),
-            ("CONTRAST", self.contrast, 0.5, 3.0, 0.05),
-            ("SS STRENGTH", self.ssao_strength, 0.0, 2.0, 0.05),
-            ("SS DEPTH", self.ssao_depth_thresh, 0.001, 0.5, 0.005),
-            ("SS START", self.ssao_start_dist, 0.5, 10.0, 0.25),
-            ("SS GROWTH", self.ssao_step_growth, 1.01, 1.5, 0.01),
-            ("SS MAX", self.ssao_max_shadow, 0.0, 1.0, 0.05),
+            ("CONTRAST", self.contrast, 0.5, 8.0, 0.05),
+            ("SS STRENGTH", self.ssao_strength, 0.0, 15.0, 0.2),
+            ("SS DEPTH", self.ssao_depth_thresh, 0.001, 1.5, 0.01),
+            ("SS START", self.ssao_start_dist, 0.1, 30.0, 0.5),
+            ("SS GROWTH", self.ssao_step_growth, 1.01, 3.0, 0.02),
+            ("SS MAX", self.ssao_max_shadow, 0.0, 3.0, 0.1),
+            ("RENDER SCL", self.render_scale, 1.0, 8.0, 0.25),
         ]
     }
 
@@ -438,6 +441,7 @@ impl SliderState {
             9 => &mut self.ssao_start_dist,
             10 => &mut self.ssao_step_growth,
             11 => &mut self.ssao_max_shadow,
+            12 => &mut self.render_scale,
             _ => unreachable!(),
         }
     }
@@ -448,8 +452,12 @@ impl SliderState {
         *val = (*val + delta as f32 * step).clamp(min, max);
     }
 
-    fn cycle(&mut self) {
+    fn next(&mut self) {
         self.active = (self.active + 1) % NUM_SLIDERS;
+    }
+
+    fn prev(&mut self) {
+        self.active = (self.active + NUM_SLIDERS - 1) % NUM_SLIDERS;
     }
 
     fn scene_params(&self) -> preview::gpu::SceneParams {
@@ -474,6 +482,8 @@ impl SliderState {
             ssao_step_growth: Some(self.ssao_step_growth),
             ssao_max_shadow: Some(self.ssao_max_shadow),
             supersample: false,
+            show_depth: false,
+            render_scale: None,
         }
     }
 }
@@ -569,8 +579,10 @@ impl ApplicationHandler for ViewerApp {
                 if event.state.is_pressed() {
                     if event.logical_key == Key::Named(NamedKey::Escape) {
                         event_loop.exit();
-                    } else if event.logical_key == Key::Named(NamedKey::Tab) {
-                        self.sliders.cycle();
+                    } else if event.logical_key == Key::Named(NamedKey::ArrowUp) {
+                        self.sliders.prev();
+                    } else if event.logical_key == Key::Named(NamedKey::ArrowDown) {
+                        self.sliders.next();
                     } else if event.logical_key == Key::Named(NamedKey::ArrowLeft) {
                         self.sliders.adjust(-1);
                     } else if event.logical_key == Key::Named(NamedKey::ArrowRight) {
@@ -580,6 +592,9 @@ impl ApplicationHandler for ViewerApp {
                             match text.as_str() {
                                 "w" => viewer.toggle_wireframe(),
                                 "b" => viewer.toggle_all_white(),
+                                "s" => viewer.toggle_stencil_shadow(),
+                                "t" => viewer.show_tui_mode = !viewer.show_tui_mode,
+                                "d" => viewer.toggle_depth(),
                                 _ => {}
                             }
                         }
@@ -789,6 +804,9 @@ struct Viewer {
     frame_size: (u32, u32),
     show_wireframe: bool,
     show_all_white: bool,
+    show_stencil_shadow: bool,
+    show_tui_mode: bool,
+    show_depth: bool,
 }
 
 enum Presenter {
@@ -856,6 +874,9 @@ impl Viewer {
             frame_size: (size.width.max(1), size.height.max(1)),
             show_wireframe: false,
             show_all_white: false,
+            show_stencil_shadow: true,
+            show_tui_mode: false,
+            show_depth: false,
         })
     }
 
@@ -890,6 +911,18 @@ impl Viewer {
         self.show_all_white = new_value;
     }
 
+    fn toggle_depth(&mut self) {
+        self.show_depth = !self.show_depth;
+    }
+
+    fn toggle_stencil_shadow(&mut self) {
+        let new_value = !self.show_stencil_shadow;
+        if let Presenter::Gpu(gpu) = &mut self.presenter {
+            gpu.renderer.set_stencil_shadow(new_value);
+        }
+        self.show_stencil_shadow = new_value;
+    }
+
     fn wireframe_supported(&self) -> bool {
         match &self.presenter {
             Presenter::Gpu(gpu) => gpu.renderer.wireframe_supported(),
@@ -916,7 +949,86 @@ impl Viewer {
             width: image.width,
             height: image.height,
         };
-        let scene_params = sliders.scene_params();
+        let mut scene_params = sliders.scene_params();
+        scene_params.show_depth = self.show_depth;
+
+        if self.show_tui_mode {
+            let tui_cols = 140usize;
+            let tui_rows = (tui_cols as f32 / (out_w as f32 / out_h as f32) / 2.0).max(1.0) as usize;
+            let tui_px_w = tui_cols;
+            let tui_px_h = tui_rows * 2;
+
+            let tui_params = preview::gpu::SceneParams {
+                sharpen: Some(0.1),
+                dither: Some(0.3),
+                vhs: Some(0.5),
+                jitter: Some(0.1),
+                supersample: false,
+                render_scale: Some(sliders.render_scale),
+                ..scene_params
+            };
+
+            let (renderer_name, render_w, render_h, tui_rgb) = match &mut self.presenter {
+                Presenter::Gpu(gpu) => {
+                    let rgb = gpu.renderer.readback_offscreen_rgb(
+                        &texture,
+                        tui_px_w,
+                        tui_px_h,
+                        elapsed_ms / 50,
+                        &tui_params,
+                    );
+                    ("GPU/TUI", tui_px_w, tui_px_h, rgb)
+                }
+                Presenter::Cpu(_) => {
+                    let rgb = preview::cpu::render_billboard_rgb(
+                        &texture, tui_px_w, tui_px_h, elapsed_ms / 50,
+                    );
+                    ("CPU/TUI", tui_px_w, tui_px_h, rgb)
+                }
+            };
+
+            let cell_colors = halfblock_cell_colors(&tui_rgb, tui_px_w, tui_px_h, tui_rows);
+            let mut fb = vec![(0u8, 0u8, 0u8); out_w as usize * out_h as usize];
+            scale_cells_to_fb(
+                &cell_colors,
+                tui_cols,
+                tui_rows,
+                &mut fb,
+                out_w as usize,
+                out_h as usize,
+            );
+
+            let render_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            self.perf.render_ms_ema = Some(ema(self.perf.render_ms_ema, render_ms));
+            self.perf.frame_count += 1;
+
+            let overlay = PerfOverlay {
+                fps: self.perf.fps_ema.unwrap_or(0.0),
+                frame_ms: self.perf.frame_interval_ms_ema.unwrap_or(0.0),
+                render_ms: self.perf.render_ms_ema.unwrap_or(0.0),
+                frame_count: self.perf.frame_count,
+                output_w: out_w as usize,
+                output_h: out_h as usize,
+                render_w,
+                render_h,
+                renderer_name,
+                show_wireframe: self.show_wireframe,
+                wireframe_supported: self.wireframe_supported(),
+                show_all_white: self.show_all_white,
+                show_stencil_shadow: self.show_stencil_shadow,
+                show_tui_mode: self.show_tui_mode,
+                show_depth: self.show_depth,
+                sliders,
+            };
+            return match &mut self.presenter {
+                Presenter::Gpu(gpu) => gpu.present_rgb_fb(&fb, &overlay, out_w, out_h),
+                Presenter::Cpu(cpu) => {
+                    draw_perf_overlay(&mut fb, out_w as usize, out_h as usize, &overlay);
+                    cpu.present_rgb(&fb)
+                }
+            };
+        }
+
         let (renderer_name, render_w, render_h) = match &mut self.presenter {
             Presenter::Gpu(gpu) => {
                 gpu.render_scene(&texture, out_w as usize, out_h as usize, elapsed_ms / 50, &scene_params)?
@@ -940,6 +1052,9 @@ impl Viewer {
             show_wireframe: self.show_wireframe,
             wireframe_supported: self.wireframe_supported(),
             show_all_white: self.show_all_white,
+            show_stencil_shadow: self.show_stencil_shadow,
+            show_tui_mode: self.show_tui_mode,
+            show_depth: self.show_depth,
             sliders,
         };
         match &mut self.presenter {
@@ -1287,6 +1402,19 @@ impl GpuPresenter {
         Ok(())
     }
 
+    fn present_rgb_fb(&mut self, fb: &[(u8, u8, u8)], overlay: &PerfOverlay<'_>, out_w: u32, out_h: u32) -> Result<()> {
+        let w = out_w as usize;
+        let h = out_h as usize;
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in (0..h).rev() {
+            for &(r, g, b) in &fb[y * w..(y + 1) * w] {
+                rgba.extend_from_slice(&[r, g, b, 255]);
+            }
+        }
+        self.renderer.write_to_postprocess_output(&rgba, out_w, out_h);
+        self.present(overlay, out_w, out_h)
+    }
+
     fn ensure_overlay_texture(&mut self, width: u32, height: u32) {
         if self.overlay_size == (width, height) {
             return;
@@ -1333,6 +1461,59 @@ fn create_overlay_texture(
     (texture, view)
 }
 
+fn halfblock_cell_colors(
+    rgb: &[(u8, u8, u8)],
+    px_w: usize,
+    px_h: usize,
+    rows: usize,
+) -> Vec<((u8, u8, u8), (u8, u8, u8))> {
+    let mut cells = Vec::with_capacity(rows * px_w);
+    for row in 0..rows {
+        let top_y = row * 2;
+        let bot_y = row * 2 + 1;
+        for col in 0..px_w {
+            let top = if top_y < px_h && top_y * px_w + col < rgb.len() {
+                rgb[top_y * px_w + col]
+            } else {
+                (0, 0, 0)
+            };
+            let bot = if bot_y < px_h && bot_y * px_w + col < rgb.len() {
+                rgb[bot_y * px_w + col]
+            } else {
+                (0, 0, 0)
+            };
+            cells.push((top, bot));
+        }
+    }
+    cells
+}
+
+fn scale_cells_to_fb(
+    cells: &[((u8, u8, u8), (u8, u8, u8))],
+    cols: usize,
+    rows: usize,
+    fb: &mut [(u8, u8, u8)],
+    out_w: usize,
+    out_h: usize,
+) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let cell_w = out_w as f32 / cols as f32;
+    let cell_h = out_h as f32 / rows as f32;
+    let half_h = cell_h / 2.0;
+
+    for py in 0..out_h {
+        let cell_row = ((py as f32 / cell_h) as usize).min(rows - 1);
+        let is_top = (py as f32 - cell_row as f32 * cell_h) < half_h;
+        for px in 0..out_w {
+            let cell_col = ((px as f32 / cell_w) as usize).min(cols - 1);
+            let cell = cells[cell_row * cols + cell_col];
+            fb[py * out_w + px] = if is_top { cell.0 } else { cell.1 };
+        }
+    }
+}
+
 fn capped_render_size(width: usize, height: usize, max_dimension: usize) -> (usize, usize) {
     if width <= max_dimension && height <= max_dimension {
         return (width.max(1), height.max(1));
@@ -1364,6 +1545,9 @@ struct PerfOverlay<'a> {
     show_wireframe: bool,
     wireframe_supported: bool,
     show_all_white: bool,
+    show_stencil_shadow: bool,
+    show_tui_mode: bool,
+    show_depth: bool,
     sliders: &'a SliderState,
 }
 
@@ -1390,6 +1574,18 @@ fn perf_overlay_lines(overlay: &PerfOverlay<'_>) -> Vec<String> {
             "WHITE {}",
             if overlay.show_all_white { "ON" } else { "OFF" }
         ),
+        format!(
+            "STENCIL {}",
+            if overlay.show_stencil_shadow { "ON" } else { "OFF" }
+        ),
+        format!(
+            "TUI {}",
+            if overlay.show_tui_mode { "ON" } else { "OFF" }
+        ),
+        format!(
+            "DEPTH {}",
+            if overlay.show_depth { "ON" } else { "OFF" }
+        ),
         String::new(),
     ];
     for (i, (name, value, _, _, _)) in overlay.sliders.sliders().iter().enumerate() {
@@ -1397,8 +1593,9 @@ fn perf_overlay_lines(overlay: &PerfOverlay<'_>) -> Vec<String> {
         lines.push(format!("{}{} {:.2}", marker, name, value));
     }
     lines.push(String::new());
-    lines.push("TAB SLIDER  </> ADJUST".to_string());
-    lines.push("W WIREFRAME  B WHITE".to_string());
+    lines.push("UP/DN SLIDER  </> ADJUST".to_string());
+    lines.push("W WIRE B WHITE S STENCIL".to_string());
+    lines.push("T TUI D DEPTH".to_string());
     lines.push(format!("#{}", overlay.frame_count));
     lines
 }

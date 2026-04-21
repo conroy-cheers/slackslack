@@ -62,8 +62,8 @@ fn perturb_normal(geom_n: vec3f, uv: vec2f, face_type: u32) -> vec3f {
     let h_d = luminance(textureSample(tex, tex_sampler, uv + vec2f(0.0, -texel.y)).rgb);
     let h_u = luminance(textureSample(tex, tex_sampler, uv + vec2f(0.0,  texel.y)).rgb);
 
-    let du = (h_r - h_l) * 0.5;
-    let dv = (h_u - h_d) * 0.5;
+    let du = (h_l - h_r) * 0.5;
+    let dv = (h_d - h_u) * 0.5;
     let strength = 3.0;
 
     // Tangent-space perturbation: front face tangent = +X, bitangent = -Y
@@ -142,7 +142,7 @@ fn vs_shadow(in: VertexInput) -> ShadowVertexOutput {
 fn fs_shadow(@builtin(position) pos: vec4f) -> SceneOutput {
     var out: SceneOutput;
     out.color = vec4f(0.0, 0.0, 0.0, 0.45);
-    out.depth = pos.z;
+    out.depth = 1.0;
     return out;
 }
 
@@ -179,7 +179,7 @@ fn fs_ground(in: GroundVertexOutput) -> SceneOutput {
     let edge = u.bg_color.rgb;
     var out: SceneOutput;
     out.color = vec4f(mix(center, edge, t), 1.0);
-    out.depth = in.position.z;
+    out.depth = 1.0;
     return out;
 }
 
@@ -189,9 +189,10 @@ struct SsaoParams {
     start_dist: f32,
     step_growth: f32,
     max_shadow: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    jitter_spread: f32,
+    object_bbox_min: vec2f,
+    object_bbox_max: vec2f,
+    _pad1: vec2f,
 }
 
 @group(0) @binding(0) var<uniform> ssao_u: Uniforms;
@@ -221,55 +222,80 @@ fn fs_ssao(@builtin(position) frag_coord: vec4f) -> @location(0) vec4f {
     let color = textureLoad(ssao_color, px, 0);
     let raw_depth = textureLoad(ssao_linear_depth, px, 0).r;
 
+    if (ssao_u.debug_flags & 2u) != 0u {
+        if raw_depth >= 0.999 {
+            return vec4f(0.0, 0.0, 0.0, 1.0);
+        }
+        let lin = linearize_depth(raw_depth);
+        let v = clamp(1.0 - lin / ssao_u.far, 0.0, 1.0);
+        return vec4f(v, v, v, 1.0);
+    }
+
     if raw_depth >= 0.999 {
         return color;
     }
 
-    let my_lin = linearize_depth(raw_depth);
     let dims = vec2f(textureDimensions(ssao_color));
 
-    // Project light direction into screen space.
-    // Transform the direction as (w=0) through view-projection, then convert
-    // the resulting clip-space vector to pixel offsets.
+    // Project light direction into screen space (xy + NDC z).
     let p0 = ssao_u.ground_mvp * vec4f(0.0, 0.0, 0.0, 1.0);
     let p1 = ssao_u.ground_mvp * vec4f(ssao_u.light_dir.xyz, 1.0);
-    let s0 = p0.xy / p0.w;
-    let s1 = p1.xy / p1.w;
-    var light_ndc = s1 - s0;
-    // NDC Y+ is up but frag_coord Y+ is down — flip Y
-    light_ndc.y = -light_ndc.y;
-    let light_screen = normalize(light_ndc * dims);
+    let ndc0 = p0.xyz / p0.w;
+    let ndc1 = p1.xyz / p1.w;
+    var delta_ndc = ndc1 - ndc0;
+    delta_ndc.y = -delta_ndc.y;
 
-    var occlusion = 0.0;
-    var total_weight = 0.0;
-    let steps = 48;
+    let delta_screen = delta_ndc.xy * dims * 0.5;
+    let screen_len = length(delta_screen);
+    if screen_len < 0.001 {
+        return color;
+    }
+    let base_dir = delta_screen / screen_len;
+    let dz_ndc_per_px = delta_ndc.z / screen_len;
+
+    // Per-pixel jitter angle via interleaved gradient noise (Jimenez 2014).
+    let ign = fract(52.9829189 * fract(0.06711056 * frag_coord.x + 0.00583715 * frag_coord.y));
+    let jitter_angle = (ign - 0.5) * ssao_params.jitter_spread;
+    let ca = cos(jitter_angle);
+    let sa = sin(jitter_angle);
+    let march_dir = vec2f(ca * base_dir.x - sa * base_dir.y,
+                          sa * base_dir.x + ca * base_dir.y);
+
+    var shadow_hit = false;
+    let steps = 32;
     var dist = ssao_params.start_dist;
     let growth = ssao_params.step_growth;
+    let bbox_min = ssao_params.object_bbox_min;
+    let bbox_max = ssao_params.object_bbox_max;
     for (var i = 0; i < steps; i++) {
-        let offset = light_screen * dist;
-        let sample_px = vec2i(frag_coord.xy + offset);
-        if sample_px.x < 0 || sample_px.y < 0 || f32(sample_px.x) >= dims.x || f32(sample_px.y) >= dims.y {
+        let offset = march_dir * dist;
+        let sample_pos = frag_coord.xy + offset;
+        if sample_pos.x < bbox_min.x || sample_pos.y < bbox_min.y
+            || sample_pos.x > bbox_max.x || sample_pos.y > bbox_max.y {
+            break;
+        }
+        let sample_px = vec2i(sample_pos);
+        let scene_ndc = textureLoad(ssao_linear_depth, sample_px, 0).r;
+        if scene_ndc >= 0.999 {
             dist *= growth;
             continue;
         }
-        let sample_raw = textureLoad(ssao_linear_depth, sample_px, 0).r;
-        if sample_raw >= 0.999 {
-            dist *= growth;
-            continue;
+        let ray_ndc = clamp(raw_depth + dz_ndc_per_px * dist, 0.0, 0.999);
+        let ray_lin = linearize_depth(ray_ndc);
+        let scene_lin = linearize_depth(scene_ndc);
+
+        let diff = ray_lin - scene_lin;
+        if diff > ssao_params.depth_threshold && diff < 0.5 {
+            shadow_hit = true;
+            break;
         }
-        let sample_lin = linearize_depth(sample_raw);
-        let weight = 1.0 / (1.0 + dist * 0.008);
-        total_weight += weight;
-        if sample_lin < my_lin - ssao_params.depth_threshold {
-            occlusion += weight;
-        }
+
         dist *= growth;
     }
 
+    let shadow = select(0.0, ssao_params.max_shadow, shadow_hit);
     let depth_fade = 1.0 - smoothstep(0.9, 0.999, raw_depth);
-    let raw_occ = select(0.0, occlusion / total_weight, total_weight > 0.0);
-    let shadow = clamp(raw_occ * ssao_params.strength, 0.0, ssao_params.max_shadow) * depth_fade;
-    return vec4f(color.rgb * (1.0 - shadow), color.a);
+    return vec4f(color.rgb * (1.0 - shadow * ssao_params.strength * depth_fade), color.a);
 }
 
 struct PostprocessUniforms {
