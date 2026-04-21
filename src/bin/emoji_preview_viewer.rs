@@ -46,8 +46,7 @@ struct CompositeUniforms {
     output_size: vec2f,
     overlay_origin_px: vec2f,
     overlay_size_px: vec2f,
-    shadow_center_px: vec2f,
-    shadow_scale: vec2f,
+    _pad: vec2f,
 }
 
 @group(0) @binding(0) var billboard_tex: texture_2d<f32>;
@@ -80,27 +79,14 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
     return out;
 }
 
-fn sample_billboard(uv: vec2f) -> vec4f {
-    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
-        return vec4f(0.0);
-    }
-    return textureSample(billboard_tex, billboard_sampler, vec2f(uv.x, 1.0 - uv.y));
-}
-
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4f {
     let frag_px = in.uv * u.output_size;
     let bg_t = clamp(length((frag_px - u.output_size * 0.5) / u.output_size), 0.0, 1.0);
-    var bg = mix(vec3f(0.14, 0.16, 0.20), vec3f(0.04, 0.05, 0.10), bg_t);
+    let bg = mix(vec3f(0.14, 0.16, 0.20), vec3f(0.04, 0.05, 0.10), bg_t);
 
-    let shadow_rel = (frag_px - u.shadow_center_px) / u.shadow_scale;
-    let shadow_uv = vec2f(shadow_rel.x + 0.5, shadow_rel.y + 0.5);
-    let shadow_a = sample_billboard(shadow_uv).a;
-    let shadow_falloff = max(0.0, 1.0 - dot(shadow_rel, shadow_rel));
-    let shadow_strength = shadow_a * shadow_falloff * 0.45;
-    bg = mix(bg, vec3f(0.02, 0.02, 0.03), shadow_strength);
-
-    let bill = sample_billboard(in.uv);
+    let bill_uv = vec2f(in.uv.x, 1.0 - in.uv.y);
+    let bill = textureSample(billboard_tex, billboard_sampler, bill_uv);
     var color = mix(bg, bill.rgb, bill.a);
 
     let overlay_rel = frag_px - u.overlay_origin_px;
@@ -170,6 +156,7 @@ struct Cli {
     backend: BackendChoice,
     smoke_test: bool,
     print_help: bool,
+    bg_color: Option<[f32; 3]>,
 }
 
 impl Cli {
@@ -179,6 +166,7 @@ impl Cli {
             backend: BackendChoice::Auto,
             smoke_test: false,
             print_help: false,
+            bg_color: None,
         };
 
         let mut args = args.peekable();
@@ -189,6 +177,12 @@ impl Cli {
                         .next()
                         .ok_or_else(|| anyhow!("--backend requires one of: auto, x11, wayland"))?;
                     cli.backend = parse_backend(&value)?;
+                }
+                "--bg" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--bg requires a hex color (e.g. 1a1a2e)"))?;
+                    cli.bg_color = Some(parse_hex_color(&value)?);
                 }
                 "--smoke-test" => cli.smoke_test = true,
                 "--help" | "-h" => cli.print_help = true,
@@ -205,6 +199,17 @@ impl Cli {
     }
 }
 
+fn parse_hex_color(s: &str) -> Result<[f32; 3]> {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() != 6 {
+        bail!("expected 6-digit hex color, got '{s}'");
+    }
+    let r = u8::from_str_radix(&s[0..2], 16)?;
+    let g = u8::from_str_radix(&s[2..4], 16)?;
+    let b = u8::from_str_radix(&s[4..6], 16)?;
+    Ok([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+}
+
 fn parse_backend(value: &str) -> Result<BackendChoice> {
     match value {
         "auto" => Ok(BackendChoice::Auto),
@@ -215,8 +220,9 @@ fn parse_backend(value: &str) -> Result<BackendChoice> {
 }
 
 fn print_help() {
-    eprintln!("emoji_preview_viewer [--backend auto|x11|wayland] [--smoke-test] [IMAGE]");
+    eprintln!("emoji_preview_viewer [--backend auto|x11|wayland] [--bg HEXCOLOR] [--smoke-test] [IMAGE]");
     eprintln!("  IMAGE defaults to 'demo' and may be a PNG/GIF path.");
+    eprintln!("  --bg sets the background/floor color (e.g. --bg 1a1a2e)");
 }
 
 #[cfg(target_os = "linux")]
@@ -361,6 +367,117 @@ fn configure_event_loop(builder: &mut EventLoopBuilder<()>, choice: BackendChoic
     }
 }
 
+const NUM_SLIDERS: usize = 12;
+
+struct SliderState {
+    active: usize,
+    rotation: f32,
+    camera_pitch: f32,
+    light_azimuth: f32,
+    light_elevation: f32,
+    light_distance: f32,
+    ground_y: f32,
+    contrast: f32,
+    ssao_strength: f32,
+    ssao_depth_thresh: f32,
+    ssao_start_dist: f32,
+    ssao_step_growth: f32,
+    ssao_max_shadow: f32,
+    bg_color: Option<[f32; 3]>,
+}
+
+impl SliderState {
+    fn new(bg_color: Option<[f32; 3]>) -> Self {
+        Self {
+            active: 0,
+            rotation: 0.0,
+            camera_pitch: 0.26,
+            light_azimuth: 0.8,
+            light_elevation: 0.96,
+            light_distance: 4.8,
+            ground_y: -1.15,
+            contrast: 1.15,
+            ssao_strength: 0.55,
+            ssao_depth_thresh: 0.01,
+            ssao_start_dist: 1.5,
+            ssao_step_growth: 1.12,
+            ssao_max_shadow: 0.45,
+            bg_color,
+        }
+    }
+
+    fn sliders(&self) -> [(&'static str, f32, f32, f32, f32); NUM_SLIDERS] {
+        use std::f32::consts::PI;
+        [
+            ("ROTATION", self.rotation, -PI, PI, 0.05),
+            ("CAM PITCH", self.camera_pitch, -0.8, 0.8, 0.02),
+            ("LIGHT AZ", self.light_azimuth, -PI, PI, 0.05),
+            ("LIGHT EL", self.light_elevation, 0.1, 1.4, 0.02),
+            ("LIGHT DIST", self.light_distance, 1.0, 8.0, 0.1),
+            ("GROUND Y", self.ground_y, -3.0, -0.5, 0.05),
+            ("CONTRAST", self.contrast, 0.5, 3.0, 0.05),
+            ("SS STRENGTH", self.ssao_strength, 0.0, 2.0, 0.05),
+            ("SS DEPTH", self.ssao_depth_thresh, 0.001, 0.5, 0.005),
+            ("SS START", self.ssao_start_dist, 0.5, 10.0, 0.25),
+            ("SS GROWTH", self.ssao_step_growth, 1.01, 1.5, 0.01),
+            ("SS MAX", self.ssao_max_shadow, 0.0, 1.0, 0.05),
+        ]
+    }
+
+    fn value_mut(&mut self) -> &mut f32 {
+        match self.active {
+            0 => &mut self.rotation,
+            1 => &mut self.camera_pitch,
+            2 => &mut self.light_azimuth,
+            3 => &mut self.light_elevation,
+            4 => &mut self.light_distance,
+            5 => &mut self.ground_y,
+            6 => &mut self.contrast,
+            7 => &mut self.ssao_strength,
+            8 => &mut self.ssao_depth_thresh,
+            9 => &mut self.ssao_start_dist,
+            10 => &mut self.ssao_step_growth,
+            11 => &mut self.ssao_max_shadow,
+            _ => unreachable!(),
+        }
+    }
+
+    fn adjust(&mut self, delta: i32) {
+        let (_, _, min, max, step) = self.sliders()[self.active];
+        let val = self.value_mut();
+        *val = (*val + delta as f32 * step).clamp(min, max);
+    }
+
+    fn cycle(&mut self) {
+        self.active = (self.active + 1) % NUM_SLIDERS;
+    }
+
+    fn scene_params(&self) -> preview::gpu::SceneParams {
+        preview::gpu::SceneParams {
+            rotation: Some(self.rotation),
+            camera_pitch: Some(self.camera_pitch),
+            light_azimuth: Some(self.light_azimuth),
+            light_elevation: Some(self.light_elevation),
+            light_distance: Some(self.light_distance),
+            ground_y: Some(self.ground_y),
+            bob: None,
+            fill: None,
+            bg_color: self.bg_color,
+            sharpen: None,
+            contrast: Some(self.contrast),
+            dither: None,
+            vhs: None,
+            jitter: None,
+            ssao_strength: Some(self.ssao_strength),
+            ssao_depth_threshold: Some(self.ssao_depth_thresh),
+            ssao_start_dist: Some(self.ssao_start_dist),
+            ssao_step_growth: Some(self.ssao_step_growth),
+            ssao_max_shadow: Some(self.ssao_max_shadow),
+            supersample: false,
+        }
+    }
+}
+
 struct ViewerApp {
     cli: Cli,
     image: LoadedImage,
@@ -370,10 +487,12 @@ struct ViewerApp {
     window_id: Option<WindowId>,
     rendered_frames: u32,
     exit_error: Option<anyhow::Error>,
+    sliders: SliderState,
 }
 
 impl ViewerApp {
     fn new(cli: Cli, image: LoadedImage) -> Self {
+        let sliders = SliderState::new(cli.bg_color);
         Self {
             cli,
             image,
@@ -383,6 +502,7 @@ impl ViewerApp {
             window_id: None,
             rendered_frames: 0,
             exit_error: None,
+            sliders,
         }
     }
 
@@ -449,6 +569,12 @@ impl ApplicationHandler for ViewerApp {
                 if event.state.is_pressed() {
                     if event.logical_key == Key::Named(NamedKey::Escape) {
                         event_loop.exit();
+                    } else if event.logical_key == Key::Named(NamedKey::Tab) {
+                        self.sliders.cycle();
+                    } else if event.logical_key == Key::Named(NamedKey::ArrowLeft) {
+                        self.sliders.adjust(-1);
+                    } else if event.logical_key == Key::Named(NamedKey::ArrowRight) {
+                        self.sliders.adjust(1);
                     } else if let Some(viewer) = &mut self.viewer {
                         if let Some(text) = &event.text {
                             match text.as_str() {
@@ -475,7 +601,7 @@ impl ApplicationHandler for ViewerApp {
                     return;
                 };
                 if let Err(err) =
-                    viewer.render(&self.image, self.start.elapsed().as_millis() as u64)
+                    viewer.render(&self.image, self.start.elapsed().as_millis() as u64, &self.sliders)
                 {
                     self.fail_or_headless(event_loop, err.context("render failed"));
                     return;
@@ -695,8 +821,7 @@ struct CompositeUniforms {
     output_size: [f32; 2],
     overlay_origin_px: [f32; 2],
     overlay_size_px: [f32; 2],
-    shadow_center_px: [f32; 2],
-    shadow_scale: [f32; 2],
+    _pad: [f32; 2],
 }
 
 struct PerfStats {
@@ -772,7 +897,7 @@ impl Viewer {
         }
     }
 
-    fn render(&mut self, image: &LoadedImage, elapsed_ms: u64) -> Result<()> {
+    fn render(&mut self, image: &LoadedImage, elapsed_ms: u64, sliders: &SliderState) -> Result<()> {
         let frame_start = Instant::now();
         if let Some(last) = self.perf.last_frame_start.replace(frame_start) {
             let frame_ms = frame_start.duration_since(last).as_secs_f64() * 1000.0;
@@ -791,9 +916,10 @@ impl Viewer {
             width: image.width,
             height: image.height,
         };
+        let scene_params = sliders.scene_params();
         let (renderer_name, render_w, render_h) = match &mut self.presenter {
             Presenter::Gpu(gpu) => {
-                gpu.render_scene(&texture, out_w as usize, out_h as usize, elapsed_ms / 50)?
+                gpu.render_scene(&texture, out_w as usize, out_h as usize, elapsed_ms / 50, &scene_params)?
             }
             Presenter::Cpu(_) => ("CPU", out_w as usize, out_h as usize),
         };
@@ -814,6 +940,7 @@ impl Viewer {
             show_wireframe: self.show_wireframe,
             wireframe_supported: self.wireframe_supported(),
             show_all_white: self.show_all_white,
+            sliders,
         };
         match &mut self.presenter {
             Presenter::Gpu(gpu) => gpu.present(&overlay, out_w, out_h),
@@ -1035,6 +1162,7 @@ impl GpuPresenter {
         out_w: usize,
         out_h: usize,
         tick: u64,
+        params: &preview::gpu::SceneParams,
     ) -> Result<(&'static str, usize, usize)> {
         let (render_w, render_h) = capped_render_size(
             out_w,
@@ -1042,7 +1170,7 @@ impl GpuPresenter {
             self.renderer.max_texture_dimension_2d() as usize,
         );
         self.renderer
-            .render_to_offscreen(texture, render_w as u32, render_h as u32, tick)?;
+            .render_to_offscreen_params(texture, render_w as u32, render_h as u32, tick, params)?;
         Ok(("GPU", render_w, render_h))
     }
 
@@ -1077,8 +1205,7 @@ impl GpuPresenter {
             output_size: [out_w as f32, out_h as f32],
             overlay_origin_px: [8.0, 8.0],
             overlay_size_px: [overlay_w as f32, overlay_h as f32],
-            shadow_center_px: [out_w as f32 * 0.5, out_h as f32 * 0.80],
-            shadow_scale: [out_w as f32 * 0.34, out_h as f32 * 0.10],
+            _pad: [0.0; 2],
         };
         self.renderer.queue().write_buffer(
             &self.composite_uniform_buffer,
@@ -1237,10 +1364,11 @@ struct PerfOverlay<'a> {
     show_wireframe: bool,
     wireframe_supported: bool,
     show_all_white: bool,
+    sliders: &'a SliderState,
 }
 
 fn perf_overlay_lines(overlay: &PerfOverlay<'_>) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("FPS {:.1}", overlay.fps),
         format!("FRAME {:.2}MS", overlay.frame_ms),
         format!("RENDER {:.2}MS", overlay.render_ms),
@@ -1262,9 +1390,17 @@ fn perf_overlay_lines(overlay: &PerfOverlay<'_>) -> Vec<String> {
             "WHITE {}",
             if overlay.show_all_white { "ON" } else { "OFF" }
         ),
-        "w wireframe  b white".to_string(),
-        format!("#{}", overlay.frame_count),
-    ]
+        String::new(),
+    ];
+    for (i, (name, value, _, _, _)) in overlay.sliders.sliders().iter().enumerate() {
+        let marker = if i == overlay.sliders.active { ">" } else { " " };
+        lines.push(format!("{}{} {:.2}", marker, name, value));
+    }
+    lines.push(String::new());
+    lines.push("TAB SLIDER  </> ADJUST".to_string());
+    lines.push("W WIREFRAME  B WHITE".to_string());
+    lines.push(format!("#{}", overlay.frame_count));
+    lines
 }
 
 fn draw_perf_overlay(
@@ -1579,11 +1715,16 @@ fn glyph_pattern(ch: char) -> [u8; 5] {
         '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
         '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
         'A' => [0b111, 0b101, 0b111, 0b101, 0b101],
+        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
         'C' => [0b111, 0b100, 0b100, 0b100, 0b111],
         'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
         'E' => [0b111, 0b100, 0b110, 0b100, 0b111],
         'F' => [0b111, 0b100, 0b110, 0b100, 0b100],
         'G' => [0b111, 0b100, 0b101, 0b101, 0b111],
+        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
+        'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
+        'J' => [0b001, 0b001, 0b001, 0b101, 0b111],
+        'L' => [0b100, 0b100, 0b100, 0b100, 0b111],
         'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
         'N' => [0b101, 0b111, 0b111, 0b111, 0b101],
         'O' => [0b111, 0b101, 0b101, 0b101, 0b111],
@@ -1592,9 +1733,15 @@ fn glyph_pattern(ch: char) -> [u8; 5] {
         'S' => [0b111, 0b100, 0b111, 0b001, 0b111],
         'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
         'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+        'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
         'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
+        'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
         '#' => [0b010, 0b111, 0b010, 0b111, 0b010],
         '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        '>' => [0b100, 0b010, 0b001, 0b010, 0b100],
+        '<' => [0b001, 0b010, 0b100, 0b010, 0b001],
+        '/' => [0b001, 0b001, 0b010, 0b100, 0b100],
         ' ' => [0b000, 0b000, 0b000, 0b000, 0b000],
         _ => [0b111, 0b101, 0b010, 0b000, 0b010],
     }

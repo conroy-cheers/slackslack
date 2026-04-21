@@ -51,6 +51,9 @@ fn render_inline_emoji(
     state: &AppState,
 ) -> std::io::Result<()> {
     for p in &state.inline_emoji_placements {
+        if is_occluded(p.screen_row, p.screen_col, p.display_rows, p.display_cols, &state.occlusion_rects) {
+            continue;
+        }
         let cached = if let Some(uid) = p.emoji_key.strip_prefix("avatar:") {
             match state.avatar_images.get(uid) {
                 Some(c) => c,
