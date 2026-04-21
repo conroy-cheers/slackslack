@@ -660,7 +660,7 @@ impl GpuRenderer {
     }
 
     fn ensure_texture(&mut self, texture: &Texture) {
-        let threshold = ALPHA_SHAPE_THRESHOLD;
+        let threshold = 160u8;
         let mut rgba_data: Vec<u8> = texture
             .pixels
             .iter()
@@ -951,7 +951,7 @@ fn extruded_billboard_geometry(
     let hh = 1.0 / aspect.max(0.0001);
     let hd = hw * depth_ratio;
 
-    let max_cells = 32usize;
+    let max_cells = 256usize;
     let (grid_w, grid_h) = if texture.width >= texture.height {
         let gh = ((texture.height as f32 / texture.width as f32) * max_cells as f32)
             .round()
@@ -968,7 +968,7 @@ fn extruded_billboard_geometry(
     let rows = grid_h + 1;
     let field = alpha_field(texture, cols, rows);
 
-    let threshold = ALPHA_SHAPE_THRESHOLD as f64 / 255.0;
+    let threshold = 160.0 / 255.0;
     let field_f64: Vec<f64> = field.iter().map(|&v| v as f64).collect();
 
     let builder = contour::ContourBuilder::new(cols, rows, true)
