@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Emoji Billboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0c121c; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #loading {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #50b4ff; font-family: monospace; font-size: 18px;
+  }
+  #fps-counter {
+    position: fixed;
+    right: 18px;
+    bottom: 14px;
+    z-index: 10;
+    color: rgba(255,255,255,0.92);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.35;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.65);
+    white-space: pre;
+    text-align: right;
+    pointer-events: none;
+  }
+  #transfer-controls {
+    position: fixed;
+    left: 18px;
+    bottom: 18px;
+    z-index: 10;
+    min-width: 220px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(10, 12, 18, 0.82);
+    backdrop-filter: blur(6px);
+    color: rgba(255,255,255,0.92);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  #transfer-controls h1 {
+    margin: 0 0 8px 0;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  #transfer-controls label {
+    display: block;
+    margin-top: 8px;
+  }
+  #transfer-controls .row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 2px;
+  }
+  #transfer-controls input[type="range"] {
+    width: 100%;
+  }
+</style>
+</head>
+<body>
+<div id="loading">Initializing WebGPU...</div>
+<canvas id="emoji-canvas"></canvas>
+<div id="transfer-controls">
+  <h1>Transfer</h1>
+  <label>
+    <div class="row"><span>Linear Gain</span><span id="gain-value">1.15</span></div>
+    <input id="gain-slider" type="range" min="0.70" max="1.40" step="0.01" value="1.15">
+  </label>
+  <label>
+    <div class="row"><span>Gamma</span><span id="gamma-value">1.00</span></div>
+    <input id="gamma-slider" type="range" min="0.70" max="1.30" step="0.01" value="1.00">
+  </label>
+  <label>
+    <div class="row"><span>Lift</span><span id="lift-value">-0.050</span></div>
+    <input id="lift-slider" type="range" min="-0.08" max="0.08" step="0.001" value="-0.050">
+  </label>
+  <label>
+    <div class="row"><span>Saturation</span><span id="saturation-value">1.25</span></div>
+    <input id="saturation-slider" type="range" min="0.50" max="1.80" step="0.01" value="1.25">
+  </label>
+</div>
+<div id="fps-counter">-- FPS
+TERM --.- MS
+3D   --.- MS
+COMP --.- MS</div>
+<script type="module">
+import init, { set_perf_toggles, set_transfer_tuning } from './pkg/emoji_web.js';
+document.getElementById('loading').remove();
+await init();
+
+const gain = document.getElementById('gain-slider');
+const gamma = document.getElementById('gamma-slider');
+const lift = document.getElementById('lift-slider');
+const saturation = document.getElementById('saturation-slider');
+const gainValue = document.getElementById('gain-value');
+const gammaValue = document.getElementById('gamma-value');
+const liftValue = document.getElementById('lift-value');
+const saturationValue = document.getElementById('saturation-value');
+
+function updateTransfer() {
+  const g = Number(gain.value);
+  const gm = Number(gamma.value);
+  const l = Number(lift.value);
+  const s = Number(saturation.value);
+  gainValue.textContent = g.toFixed(2);
+  gammaValue.textContent = gm.toFixed(2);
+  liftValue.textContent = l.toFixed(3);
+  saturationValue.textContent = s.toFixed(2);
+  set_transfer_tuning(g, gm, l, s);
+}
+
+gain.addEventListener('input', updateTransfer);
+gamma.addEventListener('input', updateTransfer);
+lift.addEventListener('input', updateTransfer);
+saturation.addEventListener('input', updateTransfer);
+updateTransfer();
+
+const perfToggles = {
+  crt: true,
+  transfer: true,
+  overlayFilter: true,
+  billboard: true,
+};
+
+function applyPerfToggles() {
+  set_perf_toggles(
+    perfToggles.crt,
+    perfToggles.transfer,
+    perfToggles.overlayFilter,
+    perfToggles.billboard,
+  );
+}
+
+window.__emojiPerfControls = {
+  setToggles(next) {
+    if (typeof next !== 'object' || next === null) return;
+    if ('crt' in next) perfToggles.crt = Boolean(next.crt);
+    if ('transfer' in next) perfToggles.transfer = Boolean(next.transfer);
+    if ('overlayFilter' in next) perfToggles.overlayFilter = Boolean(next.overlayFilter);
+    if ('billboard' in next) perfToggles.billboard = Boolean(next.billboard);
+    applyPerfToggles();
+  },
+  getToggles() {
+    return { ...perfToggles };
+  },
+};
+
+applyPerfToggles();
+</script>
+</body>
+</html>

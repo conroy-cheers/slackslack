@@ -786,9 +786,9 @@ fn run_headless_smoke_test(image: &LoadedImage) -> Result<()> {
         width: image.width,
         height: image.height,
     };
-    let rgb = match preview::gpu::GpuRenderer::try_new() {
-        Ok(mut gpu) => gpu.render_billboard_rgb(&texture, 960, 720, 0),
-        Err(_) => preview::cpu::render_billboard_rgb(&texture, 960, 720, 0),
+    let rgb = match preview::gpu::try_new() {
+        Ok(mut gpu) => gpu.render_billboard_rgb(&texture, 960, 720, 0.0),
+        Err(_) => preview::cpu::render_billboard_rgb(&texture, 960, 720, 0.0),
     };
     if rgb.is_empty() {
         bail!("headless smoke test produced no pixels");
@@ -968,20 +968,21 @@ impl Viewer {
                 ..scene_params
             };
 
+            let time_secs = elapsed_ms as f64 / 1000.0;
             let (renderer_name, render_w, render_h, tui_rgb) = match &mut self.presenter {
                 Presenter::Gpu(gpu) => {
                     let rgb = gpu.renderer.readback_offscreen_rgb(
                         &texture,
                         tui_px_w,
                         tui_px_h,
-                        elapsed_ms / 50,
+                        time_secs,
                         &tui_params,
                     );
                     ("GPU/TUI", tui_px_w, tui_px_h, rgb)
                 }
                 Presenter::Cpu(_) => {
                     let rgb = preview::cpu::render_billboard_rgb(
-                        &texture, tui_px_w, tui_px_h, elapsed_ms / 50,
+                        &texture, tui_px_w, tui_px_h, time_secs,
                     );
                     ("CPU/TUI", tui_px_w, tui_px_h, rgb)
                 }
@@ -1029,9 +1030,10 @@ impl Viewer {
             };
         }
 
+        let time_secs = elapsed_ms as f64 / 1000.0;
         let (renderer_name, render_w, render_h) = match &mut self.presenter {
             Presenter::Gpu(gpu) => {
-                gpu.render_scene(&texture, out_w as usize, out_h as usize, elapsed_ms / 50, &scene_params)?
+                gpu.render_scene(&texture, out_w as usize, out_h as usize, time_secs, &scene_params)?
             }
             Presenter::Cpu(_) => ("CPU", out_w as usize, out_h as usize),
         };
@@ -1064,7 +1066,7 @@ impl Viewer {
                     &texture,
                     out_w as usize,
                     out_h as usize,
-                    elapsed_ms / 50,
+                    time_secs,
                 );
                 draw_perf_overlay(&mut rgb, out_w as usize, out_h as usize, &overlay);
                 cpu.present_rgb(&rgb)
@@ -1115,9 +1117,9 @@ impl GpuPresenter {
         let surface = instance
             .create_surface(window)
             .context("failed to create wgpu surface")?;
-        let adapter = preview::gpu::GpuRenderer::request_adapter(&instance, Some(&surface))?;
+        let adapter = preview::gpu::request_adapter(&instance, Some(&surface))?;
         let caps = surface.get_capabilities(&adapter);
-        let renderer = preview::gpu::GpuRenderer::from_adapter(adapter)?;
+        let renderer = preview::gpu::from_adapter(adapter)?;
 
         let format = caps
             .formats
@@ -1276,7 +1278,7 @@ impl GpuPresenter {
         texture: &Texture,
         out_w: usize,
         out_h: usize,
-        tick: u64,
+        time_secs: f64,
         params: &preview::gpu::SceneParams,
     ) -> Result<(&'static str, usize, usize)> {
         let (render_w, render_h) = capped_render_size(
@@ -1285,7 +1287,7 @@ impl GpuPresenter {
             self.renderer.max_texture_dimension_2d() as usize,
         );
         self.renderer
-            .render_to_offscreen_params(texture, render_w as u32, render_h as u32, tick, params)?;
+            .render_to_offscreen_params(texture, render_w as u32, render_h as u32, time_secs, params)?;
         Ok(("GPU", render_w, render_h))
     }
 

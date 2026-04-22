@@ -153,7 +153,7 @@ impl App {
                     if self.state.input_mode == crate::state::InputMode::EmojiPreview
                         && !self.state.emoji_preview_frames.is_empty()
                     {
-                        self.state.emoji_preview_tick += 1;
+                        self.state.emoji_preview_time += 0.05;
                         self.state.dirty = true;
                     }
                     Self::render_frame(&mut self.state, &mut terminal)?;

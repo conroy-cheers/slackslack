@@ -1952,7 +1952,7 @@ async fn ctrl_p_in_emoji_picker_opens_3d_preview() {
     h.press_ctrl('p');
     assert_eq!(h.state.input_mode, InputMode::EmojiPreview);
     assert_eq!(h.state.emoji_preview_name, expected_name);
-    assert_eq!(h.state.emoji_preview_tick, 0);
+    assert_eq!(h.state.emoji_preview_time, 0.0);
 }
 
 #[tokio::test]

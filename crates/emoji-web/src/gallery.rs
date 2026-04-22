@@ -1,0 +1,335 @@
+use crate::terminal_renderer::{TerminalGrid, TERM_COLS, TERM_ROWS};
+
+const GREEN: [u8; 4] = [0, 204, 0, 255];
+const BRIGHT: [u8; 4] = [0, 255, 0, 255];
+const DIM: [u8; 4] = [0, 102, 0, 255];
+const WHITE: [u8; 4] = [255, 255, 255, 255];
+const GRAY: [u8; 4] = [160, 160, 160, 255];
+const BG: [u8; 4] = [0, 0, 0, 255];
+const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
+
+pub struct EmojiEntry {
+    pub name: String,
+}
+
+pub struct Gallery {
+    entries: Vec<EmojiEntry>,
+    selected: usize,
+    search: String,
+    preview_index: Option<usize>,
+    preview_mix: f32,
+    preview_target: f32,
+}
+
+pub enum KeyAction {
+    Up,
+    Down,
+    Enter,
+    Escape,
+    Char(char),
+    Backspace,
+}
+
+impl Gallery {
+    pub fn is_previewing(&self) -> bool {
+        self.preview_index.is_some()
+    }
+
+    pub fn preview_mix(&self) -> f32 {
+        self.preview_mix
+    }
+
+    pub fn preview_index(&self) -> Option<usize> {
+        self.preview_index
+    }
+
+    pub fn tick(&mut self, dt_secs: f32) {
+        let speed = 6.5;
+        let delta = (dt_secs * speed).clamp(0.0, 1.0);
+        if self.preview_mix < self.preview_target {
+            self.preview_mix = (self.preview_mix + delta).min(self.preview_target);
+        } else if self.preview_mix > self.preview_target {
+            self.preview_mix = (self.preview_mix - delta).max(self.preview_target);
+        }
+
+        if self.preview_target <= 0.0 && self.preview_mix <= 0.0 {
+            self.preview_index = None;
+        }
+    }
+
+    pub fn handle_key(&mut self, action: KeyAction) {
+        if self.is_previewing() {
+            match action {
+                KeyAction::Escape | KeyAction::Backspace => {
+                    self.preview_target = 0.0;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match action {
+            KeyAction::Up => self.move_selection(-1),
+            KeyAction::Down => self.move_selection(1),
+            KeyAction::Enter => {
+                let filtered = self.filtered_entries();
+                if let Some(&(real_index, _)) = filtered.get(self.selected) {
+                    self.preview_index = Some(real_index);
+                    self.preview_target = 1.0;
+                }
+            }
+            KeyAction::Char(c) => {
+                self.search.push(c);
+                self.selected = 0;
+            }
+            KeyAction::Backspace => {
+                self.search.pop();
+                self.selected = 0;
+            }
+            KeyAction::Escape => {
+                if !self.search.is_empty() {
+                    self.search.clear();
+                    self.selected = 0;
+                }
+            }
+        }
+    }
+
+    pub fn new() -> Self {
+        let entries: Vec<EmojiEntry> = [
+            "thumbsup",
+            "heart",
+            "fire",
+            "rocket",
+            "tada",
+            "eyes",
+            "wave",
+            "100",
+            "sparkles",
+            "pray",
+            "muscle",
+            "sunglasses",
+            "thinking_face",
+            "laughing",
+            "sob",
+            "clap",
+            "raised_hands",
+            "ok_hand",
+            "point_up",
+            "star",
+            "zap",
+            "rainbow",
+            "pizza",
+            "coffee",
+            "beer",
+            "skull",
+            "ghost",
+            "robot_face",
+            "alien",
+            "unicorn",
+            "penguin",
+            "cat",
+            "dog",
+            "parrot",
+            "crab",
+        ]
+        .iter()
+        .map(|name| EmojiEntry {
+            name: name.to_string(),
+        })
+        .collect();
+
+        Self {
+            entries,
+            selected: 0,
+            search: String::new(),
+            preview_index: None,
+            preview_mix: 0.0,
+            preview_target: 0.0,
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let filtered = self.filtered_entries();
+        if filtered.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let current = self.selected as isize;
+        let len = filtered.len() as isize;
+        let next = ((current + delta) % len + len) % len;
+        self.selected = next as usize;
+    }
+
+    pub fn billboard_cell_rect(&self, area_width: u16, area_height: u16) -> Option<CellRect> {
+        if !self.is_previewing() || area_width < 2 || area_height < 2 {
+            return None;
+        }
+        Some(CellRect {
+            x: 0,
+            y: 0,
+            width: area_width,
+            height: area_height,
+        })
+    }
+
+    fn filtered_entries(&self) -> Vec<(usize, &EmojiEntry)> {
+        let search = self.search.to_ascii_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                search.is_empty() || entry.name.to_ascii_lowercase().contains(&search)
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CellRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+pub fn render_to_grid(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
+    if show_preview_overlay(gallery) {
+        grid.clear(TRANSPARENT);
+        draw_preview_overlay(grid, gallery);
+    } else {
+        grid.clear(BG);
+        draw_gallery(grid, gallery, time_secs);
+    }
+}
+
+pub fn show_preview_overlay(gallery: &Gallery) -> bool {
+    gallery.is_previewing() && gallery.preview_mix() >= 0.5
+}
+
+pub fn cursor_blink_on(time_secs: f64) -> bool {
+    ((time_secs * 2.0) as u64) % 2 == 0
+}
+
+fn ascii_rule(width: u16) -> String {
+    "-".repeat(width as usize)
+}
+
+fn put_segments(grid: &mut TerminalGrid, mut x: u16, y: u16, segments: &[(&str, [u8; 4])]) {
+    for (text, color) in segments {
+        grid.put_text(x, y, text, *color, BG);
+        x = x.saturating_add(text.chars().count() as u16);
+        if x >= TERM_COLS {
+            break;
+        }
+    }
+}
+
+fn draw_gallery(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
+    draw_header(grid, time_secs);
+    draw_emoji_list(grid, gallery);
+    draw_footer(grid, gallery);
+}
+
+fn draw_header(grid: &mut TerminalGrid, time_secs: f64) {
+    let cursor = if cursor_blink_on(time_secs) { "_" } else { " " };
+    put_segments(
+        grid,
+        0,
+        0,
+        &[(" EMOJI BILLBOARD", BRIGHT), (cursor, GREEN)],
+    );
+}
+
+fn draw_emoji_list(grid: &mut TerminalGrid, gallery: &Gallery) {
+    let filtered = gallery.filtered_entries();
+    let count = filtered.len();
+    let title = format!(" EMOJI {:>3} ", count);
+    let mut rule = ascii_rule(TERM_COLS);
+    let title_len = title.len().min(rule.len());
+    rule.replace_range(0..title_len, &title[..title_len]);
+    grid.put_text(0, 1, &rule, DIM, BG);
+
+    let list_top = 2u16;
+    let list_height = TERM_ROWS.saturating_sub(4) as usize;
+    let max_scroll = count.saturating_sub(list_height);
+    let scroll = gallery
+        .selected
+        .saturating_sub(list_height / 2)
+        .min(max_scroll);
+
+    for row in 0..list_height {
+        let idx = scroll + row;
+        if idx >= count {
+            break;
+        }
+        let y = list_top + row as u16;
+        let (_, entry) = filtered[idx];
+        let selected = idx == gallery.selected;
+        draw_entry(grid, y, &entry.name, selected);
+    }
+
+    let bottom_rule = ascii_rule(TERM_COLS);
+    grid.put_text(0, TERM_ROWS - 2, &bottom_rule, DIM, BG);
+}
+
+fn draw_entry(grid: &mut TerminalGrid, y: u16, name: &str, selected: bool) {
+    let prefix = if selected { ">" } else { " " };
+    let prefix_color = if selected { BRIGHT } else { DIM };
+    let name_color = if selected { BRIGHT } else { GREEN };
+    put_segments(
+        grid,
+        0,
+        y,
+        &[
+            (prefix, prefix_color),
+            (" :", DIM),
+            (name, name_color),
+            (":", DIM),
+        ],
+    );
+}
+
+fn draw_footer(grid: &mut TerminalGrid, gallery: &Gallery) {
+    if !gallery.search.is_empty() {
+        put_segments(
+            grid,
+            0,
+            TERM_ROWS - 1,
+            &[(" >", BRIGHT), (&gallery.search, GREEN), ("_", BRIGHT)],
+        );
+    } else {
+        put_segments(
+            grid,
+            0,
+            TERM_ROWS - 1,
+            &[
+                (" UP/DN", BRIGHT),
+                (" MOVE  ", DIM),
+                ("ENTER", BRIGHT),
+                (" VIEW  ", DIM),
+                ("TYPE", BRIGHT),
+                (" SEARCH", DIM),
+            ],
+        );
+    }
+}
+
+fn draw_preview_overlay(grid: &mut TerminalGrid, gallery: &Gallery) {
+    let name = gallery
+        .preview_index()
+        .and_then(|index| gallery.entries.get(index))
+        .map(|entry| entry.name.as_str())
+        .unwrap_or("?");
+
+    grid.put_centered(1, &format!(":{name}:"), WHITE, TRANSPARENT);
+
+    let help = "PRESS ESC TO GO BACK";
+    let start_x = ((TERM_COLS as usize).saturating_sub(help.len())) / 2;
+    put_segments(
+        grid,
+        start_x as u16,
+        TERM_ROWS - 2,
+        &[("PRESS ", GRAY), ("ESC", WHITE), (" TO GO BACK", GRAY)],
+    );
+}

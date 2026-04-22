@@ -269,7 +269,7 @@ fn emoji_preview_render_no_panic() {
     state.input_mode = InputMode::EmojiPreview;
     state.emoji_preview_char = "\u{1F525}".into();
     state.emoji_preview_name = "fire".into();
-    state.emoji_preview_tick = 0;
+    state.emoji_preview_time = 0.0;
 
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -277,9 +277,9 @@ fn emoji_preview_render_no_panic() {
         .draw(|frame| super::render(frame, &mut state))
         .unwrap();
 
-    // Advance a few ticks and re-render
+    // Advance time and re-render
     for t in 1..10 {
-        state.emoji_preview_tick = t;
+        state.emoji_preview_time = t as f64 * 0.05;
         state.dirty = true;
         terminal
             .draw(|frame| super::render(frame, &mut state))

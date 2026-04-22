@@ -184,7 +184,7 @@ pub fn handle_event<C: SlackApi>(
         }
         Event::EmojiPreviewImageLoaded { frames, frame_delays, width, height } => {
             state.emoji_preview_pending = false;
-            state.emoji_preview_tick = 0;
+            state.emoji_preview_time = 0.0;
             state.emoji_preview_frames = frames;
             state.emoji_preview_frame_delays = frame_delays;
             state.emoji_preview_tex_w = width;
@@ -1128,7 +1128,7 @@ fn handle_emoji_picker_key<C: SlackApi>(
             if let Some((name, display, is_custom)) = state.emoji_picker_results.get(state.emoji_picker_selected).cloned() {
                 state.emoji_preview_name = name.clone();
                 state.emoji_preview_char = display.clone();
-                state.emoji_preview_tick = 0;
+                state.emoji_preview_time = 0.0;
                 state.emoji_preview_frames.clear();
                 state.emoji_preview_frame_delays.clear();
                 state.emoji_preview_tex_w = 0;
@@ -1137,7 +1137,7 @@ fn handle_emoji_picker_key<C: SlackApi>(
                 state.input_mode = InputMode::EmojiPreview;
 
                 if matches!(state.billboard_renderer, crate::ui::emoji_preview::BillboardRenderer::Cpu) {
-                    match crate::ui::emoji_preview::gpu::GpuRenderer::try_new() {
+                    match crate::ui::emoji_preview::gpu::try_new() {
                         Ok(gpu) => {
                             tracing::info!("GPU renderer initialized");
                             state.billboard_renderer = crate::ui::emoji_preview::BillboardRenderer::Gpu(gpu);

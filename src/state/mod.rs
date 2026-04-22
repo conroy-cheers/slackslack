@@ -236,7 +236,7 @@ pub struct AppState {
     // Emoji 3D preview
     pub emoji_preview_char: String,
     pub emoji_preview_name: String,
-    pub emoji_preview_tick: u64,
+    pub emoji_preview_time: f64,
     pub emoji_preview_frames: Vec<Vec<[u8; 4]>>,
     pub emoji_preview_frame_delays: Vec<u32>,
     pub emoji_preview_tex_w: u32,
@@ -436,7 +436,7 @@ impl AppState {
             emoji_picker_inline_colon_pos: None,
             emoji_preview_char: String::new(),
             emoji_preview_name: String::new(),
-            emoji_preview_tick: 0,
+            emoji_preview_time: 0.0,
             emoji_preview_frames: Vec::new(),
             emoji_preview_frame_delays: Vec::new(),
             emoji_preview_tex_w: 0,

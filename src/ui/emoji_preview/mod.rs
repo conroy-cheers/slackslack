@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let frame_idx = current_frame_index(state);
     let w = inner.width as usize;
     let h = inner.height as usize;
-    let tick = state.emoji_preview_tick;
+    let time_secs = state.emoji_preview_time;
 
     let lines = match &mut state.billboard_renderer {
         BillboardRenderer::Gpu(gpu) => {
@@ -65,13 +65,14 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
                 state.emoji_preview_tex_w,
                 state.emoji_preview_tex_h,
             );
-            gpu.render_billboard(
+            gpu::render_billboard(
+                gpu,
                 frame_idx,
                 state.emoji_preview_tex_w,
                 state.emoji_preview_tex_h,
                 w,
                 h,
-                tick,
+                time_secs,
             )
         }
         BillboardRenderer::Cpu => {
@@ -80,7 +81,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
                 width: state.emoji_preview_tex_w,
                 height: state.emoji_preview_tex_h,
             };
-            cpu::render_billboard(&tex, w, h, tick)
+            cpu::render_billboard(&tex, w, h, time_secs)
         }
     };
 
@@ -93,7 +94,7 @@ fn current_frame_index(state: &AppState) -> usize {
     if n <= 1 {
         return 0;
     }
-    let elapsed_ms = state.emoji_preview_tick * 50;
+    let elapsed_ms = (state.emoji_preview_time * 1000.0) as u64;
     let total_duration: u64 = state
         .emoji_preview_frame_delays
         .iter()

@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/emoji-renderer", "crates/emoji-web"]
+resolver = "3"
+
 [package]
 name = "slackslack"
 version = "0.1.0"
@@ -40,6 +44,7 @@ base64 = "0.22"
 libc = "0.2"
 
 # GPU rendering (3D emoji preview)
+emoji-renderer = { path = "crates/emoji-renderer" }
 wgpu = "24"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
