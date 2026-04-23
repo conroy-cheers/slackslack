@@ -1,9 +1,20 @@
 const SESSION_KEY = 'slackslack.emojiWeb.session.v1';
 const PKCE_KEY = 'slackslack.emojiWeb.pkce.v1';
 const DEFAULT_REDIRECT = `${window.location.origin}${window.location.pathname}`;
+const STANDARD_EMOJI_DATA_URL = 'https://cdn.jsdelivr.net/gh/iamcal/emoji-data@master/emoji.json';
+const STANDARD_EMOJI_IMAGE_BASE_URL = 'https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/72x72';
 
 function log(...args) {
   console.log('[ultramoji-viewer-4d]', ...args);
+}
+
+function canonicalizeStandardUnified(unified) {
+  return String(unified ?? '')
+    .trim()
+    .toLowerCase()
+    .split('-')
+    .filter((part) => part && part !== 'fe0f')
+    .join('-');
 }
 
 function readConfig() {
@@ -56,8 +67,9 @@ function pushUiState(wasm, {
   signedIn = false,
   busy = false,
   loginEnabled = false,
+  catalogReady = false,
 }) {
-  wasm.set_hosted_auth_state(status, workspace, hint, signedIn, busy, loginEnabled);
+  wasm.set_hosted_auth_state(status, workspace, hint, signedIn, busy, loginEnabled, catalogReady);
 }
 
 function applyUiState(state, fields) {
@@ -68,6 +80,7 @@ function applyUiState(state, fields) {
     signedIn: false,
     busy: false,
     loginEnabled: false,
+    catalogReady: false,
     ...state.ui,
     ...fields,
   };
@@ -79,6 +92,7 @@ function applyUiState(state, fields) {
     signedIn: state.ui.signedIn,
     busy: state.ui.busy,
     loginEnabled: state.ui.loginEnabled,
+    catalogReady: state.ui.catalogReady,
     workspace: state.ui.workspace,
   });
   pushUiState(state.wasm, state.ui);
@@ -286,7 +300,95 @@ async function fetchEmojiCatalog(session) {
   return resolveEmojiCatalog(payload.emoji);
 }
 
+async function fetchStandardEmojiCatalog() {
+  log('fetching standard emoji catalog');
+  const response = await fetch(STANDARD_EMOJI_DATA_URL, {
+    method: 'GET',
+    mode: 'cors',
+    credentials: 'omit',
+  });
+  if (!response.ok) {
+    throw new Error(`Standard emoji catalog fetch failed: ${response.status} ${response.statusText}`);
+  }
+  const entries = await response.json();
+  const assetUrls = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const unified = canonicalizeStandardUnified(entry?.unified);
+    if (!unified) {
+      continue;
+    }
+    const shortNames = Array.isArray(entry?.short_names) ? entry.short_names : [];
+    if (shortNames.length === 0) {
+      continue;
+    }
+    const url = `${STANDARD_EMOJI_IMAGE_BASE_URL}/${unified}.png`;
+    for (const shortName of shortNames) {
+      const name = String(shortName ?? '').trim();
+      if (name) {
+        assetUrls.set(name, url);
+      }
+    }
+  }
+  const names = Array.from(assetUrls.keys()).sort((a, b) => a.localeCompare(b));
+  return { names, assetUrls };
+}
+
+function mergeCatalogs(...catalogs) {
+  const assetUrls = new Map();
+  for (const catalog of catalogs) {
+    if (!catalog?.assetUrls) {
+      continue;
+    }
+    for (const [name, url] of catalog.assetUrls.entries()) {
+      assetUrls.set(name, url);
+    }
+  }
+  const names = Array.from(assetUrls.keys()).sort((a, b) => a.localeCompare(b));
+  return { names, assetUrls };
+}
+
+function applyMergedCatalog(state) {
+  const merged = mergeCatalogs(state.standardCatalog, state.workspaceCatalog);
+  state.assetUrls = merged.assetUrls;
+  state.assetCache.clear();
+  state.failedEmojiNames.clear();
+  state.currentEmojiName = '';
+  state.loadedEmojiName = '';
+  state.currentRequestId += 1;
+  state.wasm.set_gallery_entries(merged.names.join('\n'));
+  state.wasm.clear_active_emoji_texture();
+  return merged;
+}
+
+function isSlackAssetUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = (parsed.hostname || '').toLowerCase();
+    return hostname === 'slack-edge.com'
+      || hostname.endsWith('.slack-edge.com')
+      || hostname === 'slack-files.com'
+      || hostname.endsWith('.slack-files.com');
+  } catch {
+    return false;
+  }
+}
+
 async function fetchEmojiBytes(url) {
+  if (!isSlackAssetUrl(url)) {
+    log('fetching public emoji bytes', { sourceUrl: url });
+    const response = await fetch(url, {
+      method: 'GET',
+      mode: 'cors',
+      credentials: 'omit',
+    });
+    if (!response.ok) {
+      throw new Error(`Emoji fetch failed: ${response.status} ${response.statusText}`);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    log('public emoji bytes fetched', { sourceUrl: url, byteLength: bytes.byteLength });
+    return bytes;
+  }
+
   const relayUrl = new URL('/emoji-asset', window.location.origin);
   relayUrl.searchParams.set('url', url);
   log('fetching emoji bytes', { relayUrl: relayUrl.toString(), sourceUrl: url });
@@ -312,35 +414,31 @@ function installStorageSync(state) {
       } catch (error) {
         clearSession();
         state.session = null;
-        state.assetUrls = new Map();
-        state.assetCache.clear();
-        state.currentEmojiName = '';
-        state.currentRequestId += 1;
-        state.wasm.set_gallery_entries('');
-        state.wasm.clear_active_emoji_texture();
+        state.workspaceCatalog = { names: [], assetUrls: new Map() };
+        const merged = applyMergedCatalog(state);
         applyUiState(state, {
-          status: 'SLACK SESSION FAILED',
+          status: merged.names.length > 0 ? `LOADED ${merged.names.length} DEFAULT EMOJI` : 'SLACK SESSION FAILED',
           hint: String(error.message || error),
           signedIn: false,
           busy: false,
           loginEnabled: Boolean(state.config.clientId),
+          catalogReady: merged.names.length > 0,
         });
       }
     } else {
-      state.assetUrls = new Map();
-      state.assetCache.clear();
-      state.currentEmojiName = '';
-      state.currentRequestId += 1;
-      state.wasm.set_gallery_entries('');
-      state.wasm.clear_active_emoji_texture();
+      state.workspaceCatalog = { names: [], assetUrls: new Map() };
+      const merged = applyMergedCatalog(state);
       applyUiState(state, {
-        status: 'SLACK SIGN-IN REQUIRED',
-        hint: state.config.clientId
-          ? 'Press ENTER to open Slack login in a new tab.'
-          : 'Set window.SLACK_EMOJI_APP_CONFIG.clientId before using hosted auth.',
+        status: merged.names.length > 0 ? `LOADED ${merged.names.length} DEFAULT EMOJI` : 'SLACK SIGN-IN REQUIRED',
+        hint: merged.names.length > 0
+          ? (state.config.clientId ? 'Sign in with Slack to add workspace emoji.' : '')
+          : (state.config.clientId
+              ? 'Press ENTER to open Slack login in a new tab.'
+              : 'Set window.SLACK_EMOJI_APP_CONFIG.clientId before using hosted auth.'),
         signedIn: false,
         busy: false,
         loginEnabled: Boolean(state.config.clientId),
+        catalogReady: merged.names.length > 0,
       });
     }
   });
@@ -353,7 +451,10 @@ export async function bootHostedEmojiApp(wasm) {
     config,
     session: loadSession(),
     assetUrls: new Map(),
+    standardCatalog: { names: [], assetUrls: new Map() },
+    workspaceCatalog: { names: [], assetUrls: new Map() },
     assetCache: new Map(),
+    failedEmojiNames: new Set(),
     currentEmojiName: '',
     loadedEmojiName: '',
     currentRequestId: 0,
@@ -365,6 +466,7 @@ export async function bootHostedEmojiApp(wasm) {
       signedIn: Boolean(loadSession()),
       busy: false,
       loginEnabled: Boolean(config.clientId),
+      catalogReady: false,
     },
   };
   log('boot hosted app', {
@@ -382,6 +484,7 @@ export async function bootHostedEmojiApp(wasm) {
           signedIn: false,
           busy: false,
           loginEnabled: false,
+          catalogReady: state.ui.catalogReady,
         });
         return;
       }
@@ -394,6 +497,7 @@ export async function bootHostedEmojiApp(wasm) {
           workspace: state.session?.team?.name || '',
           busy: false,
           loginEnabled: true,
+          catalogReady: state.ui.catalogReady,
         });
         return;
       }
@@ -411,6 +515,7 @@ export async function bootHostedEmojiApp(wasm) {
         workspace: state.session?.team?.name || '',
         busy: false,
         loginEnabled: true,
+        catalogReady: state.ui.catalogReady,
       });
     } catch (error) {
       try {
@@ -423,6 +528,7 @@ export async function bootHostedEmojiApp(wasm) {
         workspace: state.session?.team?.name || '',
         busy: false,
         loginEnabled: Boolean(config.clientId),
+        catalogReady: state.ui.catalogReady,
       });
     }
   };
@@ -432,21 +538,19 @@ export async function bootHostedEmojiApp(wasm) {
     clearSession();
     clearPkce();
     state.session = null;
-    state.assetUrls = new Map();
-    state.assetCache.clear();
-    state.currentEmojiName = '';
-    state.loadedEmojiName = '';
-    state.currentRequestId += 1;
-    state.wasm.set_gallery_entries('');
-    state.wasm.clear_active_emoji_texture();
+    state.workspaceCatalog = { names: [], assetUrls: new Map() };
+    const merged = applyMergedCatalog(state);
     applyUiState(state, {
-      status: 'SLACK SIGN-IN REQUIRED',
-      hint: config.clientId
-        ? 'Press ENTER to open Slack login in a new tab.'
-        : 'Set window.SLACK_EMOJI_APP_CONFIG.clientId before using hosted auth.',
+      status: merged.names.length > 0 ? `LOADED ${merged.names.length} DEFAULT EMOJI` : 'SLACK SIGN-IN REQUIRED',
+      hint: merged.names.length > 0
+        ? (config.clientId ? 'Sign in with Slack to add workspace emoji.' : '')
+        : (config.clientId
+            ? 'Press ENTER to open Slack login in a new tab.'
+            : 'Set window.SLACK_EMOJI_APP_CONFIG.clientId before using hosted auth.'),
       signedIn: false,
       busy: false,
       loginEnabled: Boolean(config.clientId),
+      catalogReady: merged.names.length > 0,
     });
   };
 
@@ -460,7 +564,12 @@ export async function bootHostedEmojiApp(wasm) {
       busy: state.ui.busy,
       loginEnabled: state.ui.loginEnabled,
     });
-    if (state.ui.signedIn || state.ui.busy || !state.ui.loginEnabled) {
+    if (
+      state.ui.signedIn
+      || state.ui.busy
+      || !state.ui.loginEnabled
+      || state.ui.catalogReady
+    ) {
       return;
     }
     event.preventDefault();
@@ -472,10 +581,26 @@ export async function bootHostedEmojiApp(wasm) {
   try {
     applyUiState(state, {
       status: 'INITIALIZING',
-      hint: 'Preparing hosted Slack session...',
+      hint: 'Loading standard emoji catalog.',
       signedIn: Boolean(state.session),
       busy: true,
       loginEnabled: Boolean(config.clientId),
+      catalogReady: false,
+    });
+
+    const standardCatalog = await fetchStandardEmojiCatalog();
+    log('standard emoji catalog loaded', { count: standardCatalog.names.length });
+    state.standardCatalog = standardCatalog;
+    let merged = applyMergedCatalog(state);
+    applyUiState(state, {
+      status: `LOADED ${merged.names.length} DEFAULT EMOJI`,
+      hint: state.session
+        ? 'Refreshing Slack session.'
+        : (config.clientId ? 'Sign in with Slack to add workspace emoji.' : ''),
+      signedIn: Boolean(state.session),
+      busy: Boolean(state.session),
+      loginEnabled: Boolean(config.clientId),
+      catalogReady: merged.names.length > 0,
     });
 
     if (config.clientId) {
@@ -490,6 +615,7 @@ export async function bootHostedEmojiApp(wasm) {
             signedIn: true,
             busy: false,
             loginEnabled: true,
+            catalogReady: merged.names.length > 0,
           });
           setTimeout(() => window.close(), 150);
           return;
@@ -503,28 +629,27 @@ export async function bootHostedEmojiApp(wasm) {
       await syncCatalog(state);
     } else {
       log('no session available after boot');
-      wasm.set_gallery_entries('');
       applyUiState(state, {
-        status: 'SLACK SIGN-IN REQUIRED',
-        hint: config.clientId
-          ? 'Press ENTER to open Slack login in a new tab.'
-          : 'Set window.SLACK_EMOJI_APP_CONFIG.clientId before using hosted auth.',
+        status: `LOADED ${merged.names.length} DEFAULT EMOJI`,
+        hint: config.clientId ? 'Sign in with Slack to add workspace emoji.' : '',
         signedIn: false,
         busy: false,
         loginEnabled: Boolean(config.clientId),
+        catalogReady: merged.names.length > 0,
       });
     }
   } catch (error) {
     clearSession();
     state.session = null;
-    wasm.set_gallery_entries('');
-    wasm.clear_active_emoji_texture();
+    state.workspaceCatalog = { names: [], assetUrls: new Map() };
+    const merged = applyMergedCatalog(state);
     applyUiState(state, {
-      status: 'SLACK SESSION FAILED',
+      status: merged.names.length > 0 ? `LOADED ${merged.names.length} DEFAULT EMOJI` : 'SLACK SESSION FAILED',
       hint: String(error.message || error),
       signedIn: false,
       busy: false,
       loginEnabled: Boolean(config.clientId),
+      catalogReady: merged.names.length > 0,
     });
   }
 
@@ -537,7 +662,7 @@ export async function bootHostedEmojiApp(wasm) {
           signOut();
         }
       }
-      if (!state.session) {
+      if (!state.session && state.assetUrls.size === 0) {
         if (state.currentEmojiName) {
           state.currentEmojiName = '';
         }
@@ -582,7 +707,16 @@ export async function bootHostedEmojiApp(wasm) {
 
 async function syncCatalog(state) {
   if (!state.session) {
-    throw new Error('No Slack session');
+    const merged = applyMergedCatalog(state);
+    applyUiState(state, {
+      status: `LOADED ${merged.names.length} DEFAULT EMOJI`,
+      hint: state.config.clientId ? 'Sign in with Slack to add workspace emoji.' : '',
+      signedIn: false,
+      busy: false,
+      loginEnabled: Boolean(state.config.clientId),
+      catalogReady: merged.names.length > 0,
+    });
+    return;
   }
   applyUiState(state, {
     status: 'LOADING WORKSPACE EMOJI',
@@ -591,31 +725,24 @@ async function syncCatalog(state) {
     signedIn: true,
     busy: true,
     loginEnabled: Boolean(state.config.clientId),
+    catalogReady: state.standardCatalog.names.length > 0,
   });
   const catalog = await fetchEmojiCatalog(state.session);
   log('emoji catalog loaded', { count: catalog.names.length });
-  state.assetUrls = catalog.assetUrls;
-  state.assetCache.clear();
-  state.currentEmojiName = '';
-  state.loadedEmojiName = '';
-  state.currentRequestId += 1;
-  state.wasm.set_gallery_entries(catalog.names.join('\n'));
-  state.wasm.clear_active_emoji_texture();
+  state.workspaceCatalog = catalog;
+  const merged = applyMergedCatalog(state);
   applyUiState(state, {
-    status: `LOADED ${catalog.names.length} EMOJI`,
+    status: `LOADED ${merged.names.length} EMOJI`,
     workspace: state.session?.team?.name || '',
     hint: '',
     signedIn: true,
     busy: false,
     loginEnabled: Boolean(state.config.clientId),
+    catalogReady: merged.names.length > 0,
   });
 }
 
 async function ensureEmojiTexture(state, name) {
-  if (!state.session) {
-    log('skipping emoji texture load without active session', { name });
-    return;
-  }
   const requestId = ++state.currentRequestId;
   if (!name) {
     log('clearing emoji texture because name is empty');
@@ -626,8 +753,12 @@ async function ensureEmojiTexture(state, name) {
   const url = state.assetUrls.get(name);
   if (!url) {
     log('no asset url for emoji', { name });
-    state.wasm.clear_active_emoji_texture();
-    state.loadedEmojiName = '';
+    state.failedEmojiNames.add(name);
+    state.wasm.set_active_emoji_texture_error(name);
+    state.loadedEmojiName = name;
+    return;
+  }
+  if (state.failedEmojiNames.has(name)) {
     return;
   }
   if (state.assetCache.has(url)) {
@@ -636,6 +767,7 @@ async function ensureEmojiTexture(state, name) {
       const ok = state.wasm.set_active_emoji_texture_bytes(name, state.assetCache.get(url));
       log('cached emoji decode handoff', { name, ok });
       if (ok) {
+        state.failedEmojiNames.delete(name);
         state.loadedEmojiName = name;
       }
     }
@@ -644,12 +776,23 @@ async function ensureEmojiTexture(state, name) {
 
   applyUiState(state, {
     workspace: state.session?.team?.name || '',
-    hint: `Fetching preview bytes via same-origin relay for ${url}`,
+    hint: `Fetching preview bytes for ${url}`,
     signedIn: Boolean(state.session),
     busy: false,
     loginEnabled: Boolean(state.config.clientId),
+    catalogReady: state.assetUrls.size > 0,
   });
-  const bytes = await fetchEmojiBytes(url);
+  let bytes;
+  try {
+    bytes = await fetchEmojiBytes(url);
+  } catch (error) {
+    if (requestId === state.currentRequestId) {
+      state.failedEmojiNames.add(name);
+      state.wasm.set_active_emoji_texture_error(name);
+      state.loadedEmojiName = name;
+    }
+    throw error;
+  }
   state.assetCache.set(url, bytes);
   if (requestId !== state.currentRequestId) {
     log('discarding stale emoji response', { name, url, requestId, currentRequestId: state.currentRequestId });
@@ -658,8 +801,12 @@ async function ensureEmojiTexture(state, name) {
   const decoded = state.wasm.set_active_emoji_texture_bytes(name, bytes);
   log('emoji decode handoff', { name, url, decoded });
   if (!decoded) {
+    state.failedEmojiNames.add(name);
+    state.wasm.set_active_emoji_texture_error(name);
+    state.loadedEmojiName = name;
     throw new Error(`Could not decode preview image for :${name}:`);
   }
+  state.failedEmojiNames.delete(name);
   state.loadedEmojiName = name;
   applyUiState(state, {
     workspace: state.session?.team?.name || '',
@@ -667,5 +814,6 @@ async function ensureEmojiTexture(state, name) {
     signedIn: Boolean(state.session),
     busy: false,
     loginEnabled: Boolean(state.config.clientId),
+    catalogReady: state.assetUrls.size > 0,
   });
 }

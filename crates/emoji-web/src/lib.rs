@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use emoji_renderer::decode::decode_emoji_frames;
 use emoji_renderer::gpu::{emoji_preview_scene_params, GpuRenderer};
+use emoji_renderer::texture::Texture;
 use emoji_renderer::texture::{COLOR_SOURCE_ALPHA_THRESHOLD, fill_transparent_rgb_from_nearest};
 use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
@@ -58,6 +59,7 @@ struct DecodedPreviewAsset {
 
 enum PendingPreviewAsset {
     Clear,
+    Error(String),
     Replace(DecodedPreviewAsset),
 }
 
@@ -180,6 +182,13 @@ pub fn clear_active_emoji_texture() {
 }
 
 #[wasm_bindgen]
+pub fn set_active_emoji_texture_error(name: String) {
+    PENDING_PREVIEW_ASSET.with(|pending| {
+        *pending.borrow_mut() = Some(PendingPreviewAsset::Error(name));
+    });
+}
+
+#[wasm_bindgen]
 pub fn set_active_emoji_texture_bytes(name: String, bytes: Vec<u8>) -> bool {
     let Some((frames, delays_ms, width, height)) = decode_emoji_frames(&bytes) else {
         return false;
@@ -209,8 +218,9 @@ pub fn set_hosted_auth_state(
     signed_in: bool,
     busy: bool,
     auth_configured: bool,
+    catalog_ready: bool,
 ) {
-    let auth_prompt = if !signed_in && !busy && auth_configured {
+    let auth_prompt = if !signed_in && !busy && auth_configured && !catalog_ready {
         gallery::HostedAuthPrompt::OpenLogin
     } else {
         gallery::HostedAuthPrompt::None
@@ -223,6 +233,7 @@ pub fn set_hosted_auth_state(
             signed_in,
             busy,
             auth_configured,
+            catalog_ready,
             auth_prompt,
         });
     });
@@ -446,6 +457,7 @@ struct App {
     placeholder_w: u32,
     placeholder_h: u32,
     preview_asset_name: Option<String>,
+    preview_error_name: Option<String>,
     preview_asset_revision: u64,
     preview_frames: Vec<Vec<[u8; 4]>>,
     preview_frame_delays_ms: Vec<u32>,
@@ -515,6 +527,89 @@ struct BlitUniforms {
     extra_params: [f32; 4],
 }
 
+fn render_preview_error_pixels(width: u32, height: u32, time_secs: f64) -> Vec<[u8; 4]> {
+    fn glyph_rows(ch: char) -> [u8; 7] {
+        match ch {
+            'A' => [
+                0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+            ],
+            'D' => [
+                0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+            ],
+            'E' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+            ],
+            'L' => [
+                0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+            ],
+            'O' => [
+                0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'R' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+            ],
+            ' ' => [0; 7],
+            _ => [0; 7],
+        }
+    }
+
+    let width = width.max(64);
+    let height = height.max(64);
+    let mut pixels = vec![[0, 0, 0, 255]; (width as usize) * (height as usize)];
+    let frame = (time_secs * 24.0).max(0.0) as u32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut v = frame
+                .wrapping_mul(1103515245)
+                .wrapping_add(x.wrapping_mul(928_371))
+                .wrapping_add(y.wrapping_mul(364_583))
+                .wrapping_add(12_345);
+            v ^= v >> 13;
+            v = v.wrapping_mul(1_274_126_177);
+            let mut shade = 90 + ((v & 0x3f) as u8);
+            if y % 3 == 0 {
+                shade = shade.saturating_sub(20);
+            }
+            pixels[(y as usize) * (width as usize) + (x as usize)] = [shade, shade, shade, 255];
+        }
+    }
+
+    let text = "LOAD ERROR";
+    let glyph_w = 5u32;
+    let glyph_h = 7u32;
+    let spacing = 2u32;
+    let scale = ((width.min(height) / 96).max(3)).min(8);
+    let text_w = (text.chars().count() as u32) * (glyph_w * scale + spacing) - spacing;
+    let text_h = glyph_h * scale;
+    let start_x = (width.saturating_sub(text_w)) / 2;
+    let start_y = (height.saturating_sub(text_h)) / 2;
+
+    for (i, ch) in text.chars().enumerate() {
+        let rows = glyph_rows(ch);
+        let glyph_x = start_x + i as u32 * (glyph_w * scale + spacing);
+        for (row_idx, row_bits) in rows.iter().enumerate() {
+            for col in 0..glyph_w {
+                if (row_bits >> (glyph_w - 1 - col)) & 1 == 0 {
+                    continue;
+                }
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let x = glyph_x + col * scale + sx;
+                        let y = start_y + row_idx as u32 * scale + sy;
+                        if x < width && y < height {
+                            pixels[(y as usize) * (width as usize) + (x as usize)] =
+                                [245, 245, 245, 255];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pixels
+}
+
 impl App {
     fn apply_pending_runtime_updates(&mut self) {
         let mut gallery_updated = false;
@@ -565,17 +660,39 @@ impl App {
             self.preview_w = 0;
             self.preview_h = 0;
         }
+        if self.preview_error_name.as_deref() != current_name.as_deref() {
+            self.preview_error_name = None;
+        }
         PENDING_PREVIEW_ASSET.with(|pending| {
             if let Some(update) = pending.borrow_mut().take() {
                 match update {
                     PendingPreviewAsset::Clear => {
                         debug_log("received PendingPreviewAsset::Clear");
                         self.preview_asset_name = None;
+                        self.preview_error_name = None;
                         self.preview_asset_revision = self.preview_asset_revision.wrapping_add(1);
                         self.preview_frames.clear();
                         self.preview_frame_delays_ms.clear();
                         self.preview_w = 0;
                         self.preview_h = 0;
+                    }
+                    PendingPreviewAsset::Error(name) => {
+                        if current_name.as_deref() == Some(name.as_str()) {
+                            debug_log(&format!("accepting preview load error: name={name}"));
+                            self.preview_asset_name = None;
+                            self.preview_error_name = Some(name);
+                            self.preview_asset_revision = self.preview_asset_revision.wrapping_add(1);
+                            self.preview_frames.clear();
+                            self.preview_frame_delays_ms.clear();
+                            self.preview_w = 0;
+                            self.preview_h = 0;
+                        } else {
+                            debug_log(&format!(
+                                "discarding preview load error due to selection mismatch: asset={} current={:?}",
+                                name,
+                                current_name
+                            ));
+                        }
                     }
                     PendingPreviewAsset::Replace(asset) => {
                         if current_name.as_deref() == Some(asset.name.as_str()) {
@@ -587,6 +704,7 @@ impl App {
                                 asset.height
                             ));
                             self.preview_asset_name = Some(asset.name);
+                            self.preview_error_name = None;
                             self.preview_asset_revision = self.preview_asset_revision.wrapping_add(1);
                             self.preview_frames = asset.frames;
                             self.preview_frame_delays_ms = asset.delays_ms;
@@ -604,11 +722,14 @@ impl App {
             }
         });
         let preview_loading = self.gallery.is_previewing()
+            && self.preview_error_name.as_deref() != current_name.as_deref()
             && (self.preview_asset_name.as_deref() != current_name.as_deref()
                 || self.preview_frames.is_empty()
                 || self.preview_w == 0
                 || self.preview_h == 0);
         self.gallery.set_channel_switch_loading(preview_loading);
+        self.gallery
+            .set_preview_error(self.preview_error_name.as_deref() == current_name.as_deref());
         CURRENT_EMOJI_NAME.with(|name| {
             *name.borrow_mut() = current_name.unwrap_or_default();
         });
@@ -1138,6 +1259,7 @@ impl App {
             placeholder_w,
             placeholder_h,
             preview_asset_name: None,
+            preview_error_name: None,
             preview_asset_revision: 0,
             preview_frames: Vec::new(),
             preview_frame_delays_ms: Vec::new(),
@@ -1458,7 +1580,24 @@ impl App {
                     params.jitter = Some(0.1);
                     params.supersample = true;
                     params.render_scale = Some(render_config.preview_render_scale);
-                    if let Some(index) = self.current_preview_frame_index(preview_scene_time_secs) {
+                    let current_preview_name = self.gallery.current_entry_name();
+                    if self.preview_error_name.as_deref() == current_preview_name {
+                        let error_pixels =
+                            render_preview_error_pixels(render_w, render_h, preview_scene_time_secs);
+                        self.renderer.render_to_offscreen_params(
+                            &Texture {
+                                pixels: &error_pixels,
+                                width: render_w,
+                                height: render_h,
+                            },
+                            render_w,
+                            render_h,
+                            preview_scene_time_secs,
+                            &params,
+                        )?;
+                    } else if let Some(index) =
+                        self.current_preview_frame_index(preview_scene_time_secs)
+                    {
                         self.renderer.render_animated_frame_to_offscreen_params(
                             self.preview_asset_revision,
                             &self.preview_frames,

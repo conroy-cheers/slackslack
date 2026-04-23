@@ -32,6 +32,7 @@ pub struct Gallery {
     channel_switch: f32,
     channel_switch_dir: f32,
     channel_switch_loading: bool,
+    preview_error: bool,
     preview_reset_nonce: u32,
     auth: HostedAuthState,
     login_request_nonce: u32,
@@ -49,6 +50,7 @@ pub struct HostedAuthState {
     pub signed_in: bool,
     pub busy: bool,
     pub auth_configured: bool,
+    pub catalog_ready: bool,
     pub auth_prompt: HostedAuthPrompt,
 }
 
@@ -91,6 +93,7 @@ impl Gallery {
             channel_switch: 0.0,
             channel_switch_dir: 0.0,
             channel_switch_loading: false,
+            preview_error: false,
             preview_reset_nonce: 0,
             auth: HostedAuthState {
                 status: "INITIALIZING".to_owned(),
@@ -99,6 +102,7 @@ impl Gallery {
                 signed_in: false,
                 busy: true,
                 auth_configured: false,
+                catalog_ready: false,
                 auth_prompt: HostedAuthPrompt::None,
             },
             login_request_nonce: 0,
@@ -136,6 +140,10 @@ impl Gallery {
         }
     }
 
+    pub fn set_preview_error(&mut self, error: bool) {
+        self.preview_error = error;
+    }
+
     pub fn preview_reset_nonce(&self) -> u32 {
         self.preview_reset_nonce
     }
@@ -153,8 +161,9 @@ impl Gallery {
     }
 
     pub fn set_hosted_auth_state(&mut self, auth: HostedAuthState) {
+        let should_reset_for_auth_loss = self.auth.catalog_ready && !auth.catalog_ready;
         self.auth = auth;
-        if !self.auth.signed_in {
+        if should_reset_for_auth_loss {
             self.preview_index = None;
             self.preview_target = 0.0;
             self.preview_mix = 0.0;
@@ -172,7 +181,8 @@ impl Gallery {
     }
 
     fn desired_menu(&self) -> DisplayedMenu {
-        if !self.auth.signed_in || (self.auth.busy && self.entries.is_empty()) {
+        if self.entries.is_empty() && (!self.auth.catalog_ready || self.auth.busy || !self.auth.signed_in)
+        {
             DisplayedMenu::Auth
         } else if self.settings_open {
             DisplayedMenu::Settings
@@ -253,6 +263,7 @@ impl Gallery {
 
         if self.preview_target <= 0.0 && self.preview_mix <= 0.0 {
             self.preview_index = None;
+            self.preview_error = false;
         }
 
         let switch_decay = (dt_secs * 8.5).clamp(0.0, 1.0);
@@ -281,7 +292,7 @@ impl Gallery {
             return;
         }
 
-        if matches!(action, KeyAction::F2) && !self.is_previewing() {
+        if matches!(action, KeyAction::F2) && !self.is_previewing() && self.auth.signed_in {
             self.settings_open = !self.settings_open;
             return;
         }
@@ -438,6 +449,7 @@ impl Gallery {
         let next_real_index = filtered[next].0;
         self.selected = next;
         self.preview_index = Some(next_real_index);
+        self.preview_error = false;
         self.channel_switch = 1.0;
         self.channel_switch_dir = if delta < 0 { -1.0 } else { 1.0 };
         self.channel_switch_loading = true;
@@ -593,7 +605,7 @@ fn draw_auth_screen(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) 
     let action_line = if matches!(gallery.auth.auth_prompt, HostedAuthPrompt::OpenLogin) {
         "PRESS ENTER TO OPEN SLACK LOGIN"
     } else if gallery.auth.busy {
-        "WAITING FOR SLACK"
+        "LOADING EMOJI CATALOG"
     } else if gallery.auth.signed_in {
         &gallery.auth.status
     } else if gallery.auth.auth_configured {
@@ -665,7 +677,7 @@ fn draw_emoji_list(grid: &mut TerminalGrid, gallery: &Gallery) {
     let list_height = TERM_ROWS.saturating_sub(4) as usize;
     if count == 0 {
         grid.put_centered(list_top + 1, "NO EMOJI LOADED", DIM_GRAY, BG);
-        grid.put_centered(list_top + 3, "SIGN IN WITH SLACK", DIM, BG);
+        grid.put_centered(list_top + 3, "EMOJI CATALOG UNAVAILABLE", DIM, BG);
         let bottom_rule = ascii_rule(TERM_COLS);
         grid.put_text(0, TERM_ROWS - 2, &bottom_rule, DIM, BG);
         return;
