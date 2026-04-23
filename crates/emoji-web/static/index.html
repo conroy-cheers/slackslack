@@ -86,13 +86,44 @@
     <div class="row"><span>Saturation</span><span id="saturation-value">1.25</span></div>
     <input id="saturation-slider" type="range" min="0.50" max="1.80" step="0.01" value="1.25">
   </label>
+  <h1 style="margin-top:10px;">Render</h1>
+  <label>
+    <div class="row"><span>Display Scaling</span><span id="display-scaling-value">Smooth</span></div>
+    <select id="display-scaling-select">
+      <option value="auto" selected>Smooth</option>
+      <option value="pixelated">Pixelated</option>
+    </select>
+  </label>
+  <label>
+    <div class="row"><span>Terminal Sampling</span><span id="terminal-sampling-value">Filtered</span></div>
+    <select id="terminal-sampling-select">
+      <option value="filtered" selected>Filtered</option>
+      <option value="nearest">Nearest</option>
+    </select>
+  </label>
+  <label>
+    <div class="row"><span>Gallery Canvas Res</span><span id="gallery-canvas-scale-value">1.00x</span></div>
+    <input id="gallery-canvas-scale-slider" type="range" min="0.25" max="1.50" step="0.05" value="1.00">
+  </label>
+  <label>
+    <div class="row"><span>Preview Canvas Res</span><span id="preview-canvas-scale-value">1.00x</span></div>
+    <input id="preview-canvas-scale-slider" type="range" min="0.25" max="1.50" step="0.05" value="1.00">
+  </label>
+  <label>
+    <div class="row"><span>Preview Res</span><span id="preview-res-value">180</span></div>
+    <input id="preview-res-slider" type="range" min="96" max="320" step="4" value="180">
+  </label>
+  <label>
+    <div class="row"><span>Preview SSAA</span><span id="preview-ssaa-value">2.0x</span></div>
+    <input id="preview-ssaa-slider" type="range" min="1.0" max="3.0" step="0.25" value="2.0">
+  </label>
 </div>
 <div id="fps-counter">-- FPS
 TERM --.- MS
 3D   --.- MS
 COMP --.- MS</div>
 <script type="module">
-import init, { set_perf_toggles, set_transfer_tuning } from './pkg/emoji_web.js';
+import init, { set_perf_toggles, set_render_config, set_transfer_tuning } from './pkg/emoji_web.js';
 document.getElementById('loading').remove();
 await init();
 
@@ -104,6 +135,19 @@ const gainValue = document.getElementById('gain-value');
 const gammaValue = document.getElementById('gamma-value');
 const liftValue = document.getElementById('lift-value');
 const saturationValue = document.getElementById('saturation-value');
+const displayScaling = document.getElementById('display-scaling-select');
+const terminalSampling = document.getElementById('terminal-sampling-select');
+const galleryCanvasScale = document.getElementById('gallery-canvas-scale-slider');
+const previewCanvasScale = document.getElementById('preview-canvas-scale-slider');
+const previewRes = document.getElementById('preview-res-slider');
+const previewSsaa = document.getElementById('preview-ssaa-slider');
+const displayScalingValue = document.getElementById('display-scaling-value');
+const terminalSamplingValue = document.getElementById('terminal-sampling-value');
+const galleryCanvasScaleValue = document.getElementById('gallery-canvas-scale-value');
+const previewCanvasScaleValue = document.getElementById('preview-canvas-scale-value');
+const previewResValue = document.getElementById('preview-res-value');
+const previewSsaaValue = document.getElementById('preview-ssaa-value');
+const canvas = document.getElementById('emoji-canvas');
 
 function updateTransfer() {
   const g = Number(gain.value);
@@ -122,6 +166,92 @@ gamma.addEventListener('input', updateTransfer);
 lift.addEventListener('input', updateTransfer);
 saturation.addEventListener('input', updateTransfer);
 updateTransfer();
+
+function updateRenderConfig() {
+  const displayMode = displayScaling.value;
+  const filteredSampling = terminalSampling.value === 'filtered';
+  const galleryCanvasResolutionScale = Number(galleryCanvasScale.value);
+  const previewCanvasResolutionScale = Number(previewCanvasScale.value);
+  const previewMaxDim = Number(previewRes.value);
+  const previewRenderScale = Number(previewSsaa.value);
+  displayScalingValue.textContent = displayMode === 'pixelated' ? 'Pixelated' : 'Smooth';
+  terminalSamplingValue.textContent = filteredSampling ? 'Filtered' : 'Nearest';
+  galleryCanvasScaleValue.textContent = `${galleryCanvasResolutionScale.toFixed(2)}x`;
+  previewCanvasScaleValue.textContent = `${previewCanvasResolutionScale.toFixed(2)}x`;
+  previewResValue.textContent = String(previewMaxDim);
+  previewSsaaValue.textContent = `${previewRenderScale.toFixed(2)}x`;
+  canvas.style.imageRendering = displayMode === 'pixelated' ? 'pixelated' : 'auto';
+  set_render_config(
+    galleryCanvasResolutionScale,
+    previewCanvasResolutionScale,
+    previewMaxDim,
+    previewRenderScale,
+    displayMode === 'pixelated',
+    filteredSampling,
+  );
+}
+
+let pendingRenderConfigTimer = null;
+
+function cancelPendingRenderConfig() {
+  if (pendingRenderConfigTimer !== null) {
+    clearTimeout(pendingRenderConfigTimer);
+    pendingRenderConfigTimer = null;
+  }
+}
+
+function schedulePreviewRenderConfigApply() {
+  updateRenderConfigLabelsOnly();
+  cancelPendingRenderConfig();
+  pendingRenderConfigTimer = setTimeout(() => {
+    pendingRenderConfigTimer = null;
+    updateRenderConfig();
+  }, 120);
+}
+
+function updateRenderConfigLabelsOnly() {
+  const displayMode = displayScaling.value;
+  const filteredSampling = terminalSampling.value === 'filtered';
+  const galleryCanvasResolutionScale = Number(galleryCanvasScale.value);
+  const previewCanvasResolutionScale = Number(previewCanvasScale.value);
+  const previewMaxDim = Number(previewRes.value);
+  const previewRenderScale = Number(previewSsaa.value);
+  displayScalingValue.textContent = displayMode === 'pixelated' ? 'Pixelated' : 'Smooth';
+  terminalSamplingValue.textContent = filteredSampling ? 'Filtered' : 'Nearest';
+  galleryCanvasScaleValue.textContent = `${galleryCanvasResolutionScale.toFixed(2)}x`;
+  previewCanvasScaleValue.textContent = `${previewCanvasResolutionScale.toFixed(2)}x`;
+  previewResValue.textContent = String(previewMaxDim);
+  previewSsaaValue.textContent = `${previewRenderScale.toFixed(2)}x`;
+  canvas.style.imageRendering = displayMode === 'pixelated' ? 'pixelated' : 'auto';
+}
+
+displayScaling.addEventListener('input', () => {
+  cancelPendingRenderConfig();
+  updateRenderConfig();
+});
+terminalSampling.addEventListener('input', () => {
+  cancelPendingRenderConfig();
+  updateRenderConfig();
+});
+galleryCanvasScale.addEventListener('input', () => {
+  cancelPendingRenderConfig();
+  updateRenderConfig();
+});
+previewCanvasScale.addEventListener('input', () => {
+  cancelPendingRenderConfig();
+  updateRenderConfig();
+});
+previewRes.addEventListener('input', schedulePreviewRenderConfigApply);
+previewSsaa.addEventListener('input', schedulePreviewRenderConfigApply);
+previewRes.addEventListener('change', () => {
+  cancelPendingRenderConfig();
+  updateRenderConfig();
+});
+previewSsaa.addEventListener('change', () => {
+  cancelPendingRenderConfig();
+  updateRenderConfig();
+});
+updateRenderConfig();
 
 const perfToggles = {
   crt: true,

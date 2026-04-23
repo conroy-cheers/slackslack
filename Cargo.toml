@@ -52,6 +52,10 @@ contour = "0.13"
 earcutr = "0.5"
 winit = "0.30"
 softbuffer = "0.4"
+egui = "0.31"
+egui-winit = "0.31"
+egui-wgpu = "0.31"
+fontdue = "0.9"
 
 # Notifications
 notify-rust = "4"

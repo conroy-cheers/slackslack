@@ -13,7 +13,7 @@ use terminal_renderer::{TERM_COLS, TERM_ROWS, TerminalGrid, TerminalRenderer};
 
 const COMPOSITE_SHADER: &str = include_str!("composite.wgsl");
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct TransferTuning {
     linear_gain: f32,
     gamma: f32,
@@ -21,12 +21,22 @@ struct TransferTuning {
     saturation: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PerfToggles {
     crt: bool,
     transfer: bool,
     overlay_filter: bool,
     billboard: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct RenderConfig {
+    gallery_canvas_scale: f32,
+    preview_canvas_scale: f32,
+    preview_max_dim: u32,
+    preview_render_scale: f32,
+    display_pixelated: bool,
+    overlay_filter: bool,
 }
 
 impl Default for PerfToggles {
@@ -36,6 +46,19 @@ impl Default for PerfToggles {
             transfer: true,
             overlay_filter: true,
             billboard: true,
+        }
+    }
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            gallery_canvas_scale: 1.0,
+            preview_canvas_scale: 1.0,
+            preview_max_dim: 180,
+            preview_render_scale: 2.0,
+            display_pixelated: false,
+            overlay_filter: true,
         }
     }
 }
@@ -54,6 +77,7 @@ impl Default for TransferTuning {
 thread_local! {
     static TRANSFER_TUNING: RefCell<TransferTuning> = RefCell::new(TransferTuning::default());
     static PERF_TOGGLES: RefCell<PerfToggles> = RefCell::new(PerfToggles::default());
+    static RENDER_CONFIG: RefCell<RenderConfig> = RefCell::new(RenderConfig::default());
 }
 
 #[wasm_bindgen]
@@ -81,6 +105,27 @@ pub fn set_perf_toggles(
             transfer: transfer_enabled,
             overlay_filter: overlay_filter_enabled,
             billboard: billboard_enabled,
+        };
+    });
+}
+
+#[wasm_bindgen]
+pub fn set_render_config(
+    gallery_canvas_scale: f32,
+    preview_canvas_scale: f32,
+    preview_max_dim: u32,
+    preview_render_scale: f32,
+    display_pixelated: bool,
+    overlay_filter_enabled: bool,
+) {
+    RENDER_CONFIG.with(|cfg| {
+        *cfg.borrow_mut() = RenderConfig {
+            gallery_canvas_scale: gallery_canvas_scale.clamp(0.25, 2.0),
+            preview_canvas_scale: preview_canvas_scale.clamp(0.25, 2.0),
+            preview_max_dim: preview_max_dim.max(1),
+            preview_render_scale: preview_render_scale.clamp(1.0, 4.0),
+            display_pixelated,
+            overlay_filter: overlay_filter_enabled,
         };
     });
 }
@@ -170,12 +215,27 @@ struct App {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     canvas: HtmlCanvasElement,
+    screen_pipeline: wgpu::RenderPipeline,
+    screen_bind_group_layout: wgpu::BindGroupLayout,
+    screen_bind_group: wgpu::BindGroup,
+    screen_overlay_filter: bool,
+    screen_uniform_buffer: wgpu::Buffer,
+    screen_texture: wgpu::Texture,
+    screen_texture_view: wgpu::TextureView,
+    screen_dirty: bool,
+    last_screen_transfer: TransferTuning,
+    last_screen_perf_toggles: PerfToggles,
+    last_screen_render_config: RenderConfig,
+    last_screen_preview_mix: f32,
     composite_pipeline: wgpu::RenderPipeline,
     composite_bind_group_layout: wgpu::BindGroupLayout,
     composite_bind_group: wgpu::BindGroup,
     composite_uses_billboard: bool,
+    composite_display_pixelated: bool,
+    composite_billboard_generation: u64,
     composite_uniform_buffer: wgpu::Buffer,
-    overlay_sampler: wgpu::Sampler,
+    overlay_sampler_linear: wgpu::Sampler,
+    overlay_sampler_nearest: wgpu::Sampler,
     start_time: f64,
     demo_pixels: Vec<[u8; 4]>,
     demo_w: u32,
@@ -184,7 +244,8 @@ struct App {
     terminal_renderer: TerminalRenderer,
     terminal_grid: TerminalGrid,
     terminal_dirty: bool,
-    billboard_sampler: wgpu::Sampler,
+    billboard_sampler_linear: wgpu::Sampler,
+    billboard_sampler_nearest: wgpu::Sampler,
     placeholder_billboard_view: wgpu::TextureView,
     fps_overlay: Element,
     last_time_secs: f64,
@@ -197,6 +258,7 @@ struct App {
     smoothed_composite_ms: f32,
     last_perf_label: String,
     frame_counter: u32,
+    last_effective_dpr: f64,
 }
 
 #[repr(C)]
@@ -224,6 +286,7 @@ impl App {
         let fps_overlay = document
             .get_element_by_id("fps-counter")
             .expect("no #fps-counter element");
+        let render_config = RENDER_CONFIG.with(|cfg| *cfg.borrow());
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU,
@@ -273,8 +336,17 @@ impl App {
         let caps = surface.get_capabilities(&adapter);
         let format = preferred_surface_format(&caps.formats);
 
-        let w = canvas.client_width().max(1) as u32;
-        let h = canvas.client_height().max(1) as u32;
+        let dpr = window.device_pixel_ratio().max(0.1);
+        let w = ((canvas.client_width().max(1) as f64)
+            * dpr
+            * render_config.gallery_canvas_scale as f64)
+            .round()
+            .max(1.0) as u32;
+        let h = ((canvas.client_height().max(1) as f64)
+            * dpr
+            * render_config.gallery_canvas_scale as f64)
+            .round()
+            .max(1.0) as u32;
         canvas.set_width(w);
         canvas.set_height(h);
         let config = wgpu::SurfaceConfiguration {
@@ -295,6 +367,77 @@ impl App {
                 label: Some("composite_shader"),
                 source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER.into()),
             });
+
+        let screen_bind_group_layout =
+            renderer
+                .device()
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("screen_bgl"),
+                    entries: &[
+                        bgl_texture(0),
+                        bgl_sampler(1),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        bgl_texture(3),
+                        bgl_sampler(4),
+                    ],
+                });
+
+        let screen_uniform_buffer =
+            renderer
+                .device()
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("screen_uniforms"),
+                    size: std::mem::size_of::<CompositeUniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+
+        let screen_pipeline_layout =
+            renderer
+                .device()
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("screen_pipeline_layout"),
+                    bind_group_layouts: &[&screen_bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+
+        let screen_pipeline =
+            renderer
+                .device()
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("screen_pipeline"),
+                    layout: Some(&screen_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_screen"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
 
         let composite_bind_group_layout =
             renderer
@@ -352,7 +495,7 @@ impl App {
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some("fs_composite"),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
                             blend: Some(wgpu::BlendState::REPLACE),
@@ -367,7 +510,7 @@ impl App {
                     cache: None,
                 });
 
-        let overlay_sampler =
+        let overlay_sampler_linear =
             renderer
                 .device()
                 .create_sampler(&wgpu::SamplerDescriptor {
@@ -377,8 +520,7 @@ impl App {
                     address_mode_v: wgpu::AddressMode::ClampToEdge,
                     ..Default::default()
                 });
-
-        let billboard_sampler =
+        let overlay_sampler_nearest =
             renderer
                 .device()
                 .create_sampler(&wgpu::SamplerDescriptor {
@@ -389,16 +531,43 @@ impl App {
                     ..Default::default()
                 });
 
+        let billboard_sampler_nearest =
+            renderer
+                .device()
+                .create_sampler(&wgpu::SamplerDescriptor {
+                    mag_filter: wgpu::FilterMode::Nearest,
+                    min_filter: wgpu::FilterMode::Nearest,
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    ..Default::default()
+                });
+        let billboard_sampler_linear =
+            renderer
+                .device()
+                .create_sampler(&wgpu::SamplerDescriptor {
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    ..Default::default()
+                });
+
         let terminal_renderer = TerminalRenderer::new(renderer.device(), renderer.queue())?;
         let terminal_grid = TerminalGrid::new();
         let (_placeholder_billboard_tex, placeholder_billboard_view) =
             create_rgba_texture(renderer.device(), 1, 1);
-        let composite_bind_group =
+        let (screen_texture, screen_texture_view) = create_render_target_texture(
+            renderer.device(),
+            terminal_renderer.pixel_width(),
+            terminal_renderer.pixel_height(),
+            "screen_effect_texture",
+        );
+        let screen_bind_group =
             renderer
                 .device()
                 .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("composite_bg"),
-                    layout: &composite_bind_group_layout,
+                    label: Some("screen_bg"),
+                    layout: &screen_bind_group_layout,
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
@@ -408,7 +577,36 @@ impl App {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&overlay_sampler),
+                            resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: screen_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&placeholder_billboard_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
+                        },
+                    ],
+                });
+        let composite_bind_group =
+            renderer
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("composite_bg"),
+                    layout: &composite_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&screen_texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -420,7 +618,7 @@ impl App {
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&billboard_sampler),
+                            resource: wgpu::BindingResource::Sampler(&billboard_sampler_linear),
                         },
                     ],
                 });
@@ -433,12 +631,27 @@ impl App {
             surface,
             config,
             canvas,
+            screen_pipeline,
+            screen_bind_group_layout,
+            screen_bind_group,
+            screen_overlay_filter: true,
+            screen_uniform_buffer,
+            screen_texture,
+            screen_texture_view,
+            screen_dirty: true,
+            last_screen_transfer: TransferTuning::default(),
+            last_screen_perf_toggles: PerfToggles::default(),
+            last_screen_render_config: RenderConfig::default(),
+            last_screen_preview_mix: -1.0,
             composite_pipeline,
             composite_bind_group_layout,
             composite_bind_group,
             composite_uses_billboard: false,
+            composite_display_pixelated: false,
+            composite_billboard_generation: 0,
             composite_uniform_buffer,
-            overlay_sampler,
+            overlay_sampler_linear,
+            overlay_sampler_nearest,
             start_time,
             demo_pixels,
             demo_w,
@@ -447,7 +660,8 @@ impl App {
             terminal_renderer,
             terminal_grid,
             terminal_dirty: true,
-            billboard_sampler,
+            billboard_sampler_linear,
+            billboard_sampler_nearest,
             placeholder_billboard_view,
             fps_overlay,
             last_time_secs: 0.0,
@@ -460,18 +674,21 @@ impl App {
             smoothed_composite_ms: 0.0,
             last_perf_label: String::new(),
             frame_counter: 0,
+            last_effective_dpr: dpr,
         })
     }
 
     fn handle_key(&mut self, action: gallery::KeyAction) {
         self.gallery.handle_key(action);
         self.terminal_dirty = true;
+        self.screen_dirty = true;
     }
 
     fn frame(&mut self) -> anyhow::Result<()> {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         let perf = web_sys::window().unwrap().performance().unwrap();
         let now = perf.now();
+        let frame_start = now;
         let elapsed_ms = now - self.start_time;
         let time_secs = elapsed_ms / 1000.0;
         let dt_secs = (time_secs - self.last_time_secs).max(0.0);
@@ -487,8 +704,23 @@ impl App {
             self.last_fps_label = fps_label;
         }
 
-        let w = self.canvas.client_width().max(1) as u32;
-        let h = self.canvas.client_height().max(1) as u32;
+        let window = web_sys::window().unwrap();
+        let effective_dpr = window.device_pixel_ratio().max(0.1);
+        self.last_effective_dpr = effective_dpr;
+        let render_config = RENDER_CONFIG.with(|cfg| *cfg.borrow());
+        let active_canvas_scale = if self.gallery.is_previewing() {
+            render_config.preview_canvas_scale
+        } else {
+            render_config.gallery_canvas_scale
+        };
+        let client_w = self.canvas.client_width().max(1) as u32;
+        let client_h = self.canvas.client_height().max(1) as u32;
+        let w = ((client_w as f64) * effective_dpr * active_canvas_scale as f64)
+            .round()
+            .max(1.0) as u32;
+        let h = ((client_h as f64) * effective_dpr * active_canvas_scale as f64)
+            .round()
+            .max(1.0) as u32;
         if w != self.config.width || h != self.config.height {
             self.canvas.set_width(w);
             self.canvas.set_height(h);
@@ -505,6 +737,7 @@ impl App {
             self.last_blink_on = blink_on;
             self.last_preview_overlay_visible = preview_overlay_visible;
             self.terminal_dirty = true;
+            self.screen_dirty = true;
         }
 
         let terminal_redrew = self.terminal_dirty;
@@ -514,6 +747,7 @@ impl App {
             self.terminal_renderer
                 .render(self.renderer.device(), self.renderer.queue(), &self.terminal_grid);
             self.terminal_dirty = false;
+            self.screen_dirty = true;
         }
         let terminal_ms = (perf.now() - term_start) as f32;
 
@@ -523,6 +757,13 @@ impl App {
         let terminal_rows = TERM_ROWS as f32;
         let transfer = TRANSFER_TUNING.with(|t| *t.borrow());
         let perf_toggles = PERF_TOGGLES.with(|t| *t.borrow());
+        if self.last_screen_transfer != transfer
+            || self.last_screen_perf_toggles != perf_toggles
+            || self.last_screen_render_config.overlay_filter != render_config.overlay_filter
+            || (self.last_screen_preview_mix - preview_mix).abs() > 0.001
+        {
+            self.screen_dirty = true;
+        }
 
         let overlay_w = self.terminal_renderer.pixel_width();
         let overlay_h = self.terminal_renderer.pixel_height();
@@ -532,7 +773,7 @@ impl App {
                 if overlay_w > 4 && overlay_h > 4 {
                     let native_w = cell_rect.width as f32;
                     let native_h = (cell_rect.height as f32) * 2.0;
-                    let target_max_dim = 180.0f32;
+                    let target_max_dim = render_config.preview_max_dim as f32;
                     let native_max = native_w.max(native_h).max(1.0);
                     let scale = target_max_dim / native_max;
                     let render_w = (native_w * scale).round().max(1.0) as u32;
@@ -549,7 +790,7 @@ impl App {
                     params.vhs = Some(0.5);
                     params.jitter = Some(0.1);
                     params.supersample = true;
-                    params.render_scale = Some(2.0);
+                    params.render_scale = Some(render_config.preview_render_scale);
                     self.renderer.render_to_offscreen_params(
                         &texture,
                         render_w,
@@ -574,6 +815,70 @@ impl App {
             [0.0; 4]
         };
         let scene_ms = (perf.now() - scene_start) as f32;
+
+        let screen_redrew = self.screen_dirty;
+        if self.screen_dirty {
+            let screen_uniforms = CompositeUniforms {
+                output_size: [overlay_w as f32, overlay_h as f32],
+                time_secs: time_secs as f32,
+                preview_mix,
+                terminal_rect: [0.0; 4],
+                billboard_rect: [0.0; 4],
+                terminal_grid: [
+                    terminal_cols,
+                    terminal_rows,
+                    overlay_w as f32 / terminal_cols,
+                    overlay_h as f32 / terminal_rows,
+                ],
+                transfer_tuning: [
+                    transfer.linear_gain,
+                    transfer.gamma,
+                    transfer.lift,
+                    transfer.saturation,
+                ],
+                perf_toggles: [
+                    if perf_toggles.crt { 1.0 } else { 0.0 },
+                    if perf_toggles.transfer { 1.0 } else { 0.0 },
+                    if perf_toggles.overlay_filter && render_config.overlay_filter { 1.0 } else { 0.0 },
+                    0.0,
+                ],
+            };
+            self.renderer.queue().write_buffer(
+                &self.screen_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&screen_uniforms),
+            );
+            self.ensure_screen_bind_group(render_config.overlay_filter);
+            let mut encoder =
+                self.renderer
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("screen_effect_encoder"),
+                    });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("screen_effect_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.screen_texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.screen_pipeline);
+                pass.set_bind_group(0, &self.screen_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.renderer.queue().submit(Some(encoder.finish()));
+            self.screen_dirty = false;
+            self.last_screen_transfer = transfer;
+            self.last_screen_perf_toggles = perf_toggles;
+            self.last_screen_render_config = render_config;
+            self.last_screen_preview_mix = preview_mix;
+        }
 
         let term_aspect = overlay_w as f32 / overlay_h as f32;
         let canvas_aspect = w as f32 / h as f32;
@@ -618,7 +923,7 @@ impl App {
             perf_toggles: [
                 if perf_toggles.crt { 1.0 } else { 0.0 },
                 if perf_toggles.transfer { 1.0 } else { 0.0 },
-                if perf_toggles.overlay_filter { 1.0 } else { 0.0 },
+                if perf_toggles.overlay_filter && render_config.overlay_filter { 1.0 } else { 0.0 },
                 if perf_toggles.billboard { 1.0 } else { 0.0 },
             ],
         };
@@ -629,9 +934,16 @@ impl App {
         );
 
         let uses_billboard = previewing && preview_mix > 0.0 && billboard_canvas_rect[2] > 0.0;
-        self.ensure_composite_bind_group(uses_billboard);
+        let billboard_generation = self.renderer.render_target_generation();
+        self.ensure_composite_bind_group(
+            uses_billboard,
+            render_config.display_pixelated,
+            billboard_generation,
+        );
 
+        let acquire_start = perf.now();
         let output = self.surface.get_current_texture()?;
+        let acquire_ms = (perf.now() - acquire_start) as f32;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -661,9 +973,16 @@ impl App {
             pass.draw(0..3, 0..1);
         }
 
+        let submit_start = perf.now();
         self.renderer.queue().submit(Some(encoder.finish()));
+        let submit_ms = (perf.now() - submit_start) as f32;
+        let present_start = perf.now();
         output.present();
+        let present_ms = (perf.now() - present_start) as f32;
         let composite_ms = (perf.now() - composite_start) as f32;
+        let frame_cpu_ms = (perf.now() - frame_start) as f32;
+        let frame_interval_ms = (dt_secs * 1000.0) as f32;
+        let estimated_idle_ms = (frame_interval_ms - frame_cpu_ms).max(0.0);
 
         self.smoothed_terminal_ms = self.smoothed_terminal_ms * 0.85 + terminal_ms * 0.15;
         self.smoothed_scene_ms = self.smoothed_scene_ms * 0.85 + scene_ms * 0.15;
@@ -685,11 +1004,20 @@ impl App {
             fps_label,
             previewing,
             terminal_redrew,
+            screen_redrew,
             overlay_w,
             overlay_h,
             terminal_ms,
             scene_ms,
             composite_ms,
+            acquire_ms,
+            submit_ms,
+            present_ms,
+            frame_cpu_ms,
+            frame_interval_ms,
+            estimated_idle_ms,
+            client_w,
+            client_h,
             perf_toggles,
         );
 
@@ -701,13 +1029,23 @@ impl App {
         fps_label: u32,
         previewing: bool,
         terminal_redrew: bool,
+        screen_redrew: bool,
         overlay_w: u32,
         overlay_h: u32,
         terminal_ms: f32,
         scene_ms: f32,
         composite_ms: f32,
+        acquire_ms: f32,
+        submit_ms: f32,
+        present_ms: f32,
+        frame_cpu_ms: f32,
+        frame_interval_ms: f32,
+        estimated_idle_ms: f32,
+        client_w: u32,
+        client_h: u32,
         perf_toggles: PerfToggles,
     ) {
+        let render_config = RENDER_CONFIG.with(|cfg| *cfg.borrow());
         let perf = Object::new();
         let _ = Reflect::set(
             &perf,
@@ -733,6 +1071,11 @@ impl App {
             &perf,
             &JsValue::from_str("terminalRedrew"),
             &JsValue::from_bool(terminal_redrew),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("screenRedrew"),
+            &JsValue::from_bool(screen_redrew),
         );
         let _ = Reflect::set(
             &perf,
@@ -786,6 +1129,113 @@ impl App {
         );
         let _ = Reflect::set(
             &perf,
+            &JsValue::from_str("canvasClientWidth"),
+            &JsValue::from_f64(client_w as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("canvasClientHeight"),
+            &JsValue::from_f64(client_h as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("devicePixelRatio"),
+            &JsValue::from_f64(self.last_effective_dpr),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("surfaceAcquireMs"),
+            &JsValue::from_f64(acquire_ms as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("queueSubmitMs"),
+            &JsValue::from_f64(submit_ms as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("presentMs"),
+            &JsValue::from_f64(present_ms as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("frameCpuMs"),
+            &JsValue::from_f64(frame_cpu_ms as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("frameIntervalMs"),
+            &JsValue::from_f64(frame_interval_ms as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("estimatedIdleMs"),
+            &JsValue::from_f64(estimated_idle_ms as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("terminalDrawCalls"),
+            &JsValue::from_f64(if terminal_redrew { 1.0 } else { 0.0 }),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("terminalCellInstances"),
+            &JsValue::from_f64((TERM_COLS as u32 * TERM_ROWS as u32) as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("compositeDrawCalls"),
+            &JsValue::from_f64(1.0),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("surfacePixels"),
+            &JsValue::from_f64((self.config.width as u64 * self.config.height as u64) as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("terminalPixels"),
+            &JsValue::from_f64((overlay_w as u64 * overlay_h as u64) as f64),
+        );
+        if let Some(scene_stats) = self.renderer.offscreen_perf_stats() {
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("sceneWidth"),
+                &JsValue::from_f64(scene_stats.scene_width as f64),
+            );
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("sceneHeight"),
+                &JsValue::from_f64(scene_stats.scene_height as f64),
+            );
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("sceneOutputWidth"),
+                &JsValue::from_f64(scene_stats.output_width as f64),
+            );
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("sceneOutputHeight"),
+                &JsValue::from_f64(scene_stats.output_height as f64),
+            );
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("scenePassCount"),
+                &JsValue::from_f64(scene_stats.pass_count as f64),
+            );
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("sceneDrawCalls"),
+                &JsValue::from_f64(scene_stats.draw_call_count as f64),
+            );
+            let _ = Reflect::set(
+                &perf,
+                &JsValue::from_str("sceneHasDownsample"),
+                &JsValue::from_bool(scene_stats.has_downsample),
+            );
+        }
+        let _ = Reflect::set(
+            &perf,
             &JsValue::from_str("crtEnabled"),
             &JsValue::from_bool(perf_toggles.crt),
         );
@@ -797,12 +1247,46 @@ impl App {
         let _ = Reflect::set(
             &perf,
             &JsValue::from_str("overlayFilterEnabled"),
-            &JsValue::from_bool(perf_toggles.overlay_filter),
+            &JsValue::from_bool(perf_toggles.overlay_filter && render_config.overlay_filter),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("displayPixelated"),
+            &JsValue::from_bool(render_config.display_pixelated),
         );
         let _ = Reflect::set(
             &perf,
             &JsValue::from_str("billboardEnabled"),
             &JsValue::from_bool(perf_toggles.billboard),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("previewMaxDim"),
+            &JsValue::from_f64(render_config.preview_max_dim as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("galleryCanvasScale"),
+            &JsValue::from_f64(render_config.gallery_canvas_scale as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("previewCanvasScale"),
+            &JsValue::from_f64(render_config.preview_canvas_scale as f64),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("activeCanvasScale"),
+            &JsValue::from_f64(if previewing {
+                render_config.preview_canvas_scale as f64
+            } else {
+                render_config.gallery_canvas_scale as f64
+            }),
+        );
+        let _ = Reflect::set(
+            &perf,
+            &JsValue::from_str("previewRenderScale"),
+            &JsValue::from_f64(render_config.preview_render_scale as f64),
         );
 
         if let Some(window) = web_sys::window() {
@@ -810,8 +1294,16 @@ impl App {
         }
     }
 
-    fn ensure_composite_bind_group(&mut self, uses_billboard: bool) {
-        if self.composite_uses_billboard == uses_billboard {
+    fn ensure_composite_bind_group(
+        &mut self,
+        uses_billboard: bool,
+        display_pixelated: bool,
+        billboard_generation: u64,
+    ) {
+        if self.composite_uses_billboard == uses_billboard
+            && self.composite_display_pixelated == display_pixelated
+            && (!uses_billboard || self.composite_billboard_generation == billboard_generation)
+        {
             return;
         }
 
@@ -821,6 +1313,16 @@ impl App {
                 .unwrap_or(&self.placeholder_billboard_view)
         } else {
             &self.placeholder_billboard_view
+        };
+        let overlay_sampler = if display_pixelated {
+            &self.overlay_sampler_nearest
+        } else {
+            &self.overlay_sampler_linear
+        };
+        let billboard_sampler = if display_pixelated {
+            &self.billboard_sampler_nearest
+        } else {
+            &self.billboard_sampler_linear
         };
 
         self.composite_bind_group =
@@ -832,13 +1334,11 @@ impl App {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(
-                                self.terminal_renderer.texture_view(),
-                            ),
+                            resource: wgpu::BindingResource::TextureView(&self.screen_texture_view),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.overlay_sampler),
+                            resource: wgpu::BindingResource::Sampler(overlay_sampler),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -850,11 +1350,58 @@ impl App {
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&self.billboard_sampler),
+                            resource: wgpu::BindingResource::Sampler(billboard_sampler),
                         },
                     ],
                 });
         self.composite_uses_billboard = uses_billboard;
+        self.composite_display_pixelated = display_pixelated;
+        self.composite_billboard_generation = billboard_generation;
+    }
+
+    fn ensure_screen_bind_group(&mut self, overlay_filter: bool) {
+        if self.screen_overlay_filter == overlay_filter {
+            return;
+        }
+
+        let overlay_sampler = if overlay_filter {
+            &self.overlay_sampler_linear
+        } else {
+            &self.overlay_sampler_nearest
+        };
+
+        self.screen_bind_group =
+            self.renderer
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("screen_bg"),
+                    layout: &self.screen_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.terminal_renderer.texture_view(),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(overlay_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.screen_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&self.placeholder_billboard_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(overlay_sampler),
+                        },
+                    ],
+                });
+        self.screen_overlay_filter = overlay_filter;
     }
 }
 
@@ -875,6 +1422,30 @@ fn create_rgba_texture(
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn create_render_target_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

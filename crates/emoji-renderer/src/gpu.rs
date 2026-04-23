@@ -283,6 +283,19 @@ pub struct GpuRenderer {
     cached_frames: Vec<FrameGpuState>,
     cached_frames_key: Option<usize>,
     active_frame_idx: Option<usize>,
+    last_offscreen_stats: Option<OffscreenPerfStats>,
+    render_target_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OffscreenPerfStats {
+    pub scene_width: u32,
+    pub scene_height: u32,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub pass_count: u32,
+    pub draw_call_count: u32,
+    pub has_downsample: bool,
 }
 
 struct TexState {
@@ -847,6 +860,8 @@ impl GpuRenderer {
             cached_frames: Vec::new(),
             cached_frames_key: None,
             active_frame_idx: None,
+            last_offscreen_stats: None,
+            render_target_generation: 0,
         })
     }
 
@@ -1405,6 +1420,27 @@ impl GpuRenderer {
             pass.draw(0..3, 0..1);
         }
 
+        let mut draw_call_count = 4u32;
+        if self.show_stencil_shadow {
+            draw_call_count += 1;
+        }
+        if self.show_wireframe && self.line_pipeline.is_some() {
+            draw_call_count += 1;
+        }
+        let has_downsample = rt.downsample_output_view.is_some();
+        if has_downsample {
+            draw_call_count += 1;
+        }
+        self.last_offscreen_stats = Some(OffscreenPerfStats {
+            scene_width: rt.scene_width,
+            scene_height: rt.scene_height,
+            output_width: rt.output_width,
+            output_height: rt.output_height,
+            pass_count: if has_downsample { 4 } else { 3 },
+            draw_call_count,
+            has_downsample,
+        });
+
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -1431,6 +1467,14 @@ impl GpuRenderer {
 
     pub fn offscreen_height(&self) -> Option<u32> {
         self.render_target.as_ref().map(|rt| rt.output_height)
+    }
+
+    pub fn offscreen_perf_stats(&self) -> Option<OffscreenPerfStats> {
+        self.last_offscreen_stats
+    }
+
+    pub fn render_target_generation(&self) -> u64 {
+        self.render_target_generation
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -1847,6 +1891,7 @@ impl GpuRenderer {
             output_height: height,
             padded_row_bytes,
         });
+        self.render_target_generation = self.render_target_generation.wrapping_add(1);
     }
 
     pub fn start_offscreen_readback(&mut self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {

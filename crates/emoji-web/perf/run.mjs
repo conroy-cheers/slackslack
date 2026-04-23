@@ -33,7 +33,7 @@ async function main() {
   const address = server.address();
   const port =
     typeof address === "object" && address ? Number(address.port) : requestedPort;
-  const url = `http://127.0.0.1:${port}/index.html`;
+const url = `http://localhost:${port}/index.html`;
 
   const cleanup = async () => {
     await new Promise((resolve, reject) => {
@@ -72,31 +72,32 @@ async function main() {
 
       await page.goto(url, { waitUntil: "networkidle" });
       await page.waitForSelector("#emoji-canvas");
+      const zoomInfo = await verifyPageZoom(page, 0.5);
       await waitForPerf(page, false);
       await delay(2_000);
 
-      const gallery = await captureScenario(page, "gallery", false, {});
+      const gallery = await captureScenario(page, "gallery", false, {}, zoomInfo);
       const galleryNoCrt = await captureScenario(page, "gallery_no_crt", false, {
         crt: false,
-      });
+      }, zoomInfo);
       const galleryNoTransfer = await captureScenario(page, "gallery_no_transfer", false, {
         transfer: false,
-      });
+      }, zoomInfo);
       const galleryNearest = await captureScenario(page, "gallery_nearest_overlay", false, {
         overlayFilter: false,
-      });
+      }, zoomInfo);
 
       await page.keyboard.press("Enter");
       await waitForPerf(page, true);
       await delay(2_000);
 
-      const preview = await captureScenario(page, "preview", true, {});
+      const preview = await captureScenario(page, "preview", true, {}, zoomInfo);
       const previewNoBillboard = await captureScenario(page, "preview_no_billboard", true, {
         billboard: false,
-      });
+      }, zoomInfo);
       const previewNoCrt = await captureScenario(page, "preview_no_crt", true, {
         crt: false,
-      });
+      }, zoomInfo);
 
       const summary = {
         url,
@@ -122,7 +123,13 @@ async function main() {
   }
 }
 
-async function captureScenario(page, name, expectPreview, toggles) {
+async function captureScenario(page, name, expectPreview, toggles, zoomInfo) {
+  await setPerfToggles(page, {
+    crt: true,
+    transfer: true,
+    overlayFilter: true,
+    billboard: true,
+  });
   await setPerfToggles(page, toggles);
   await delay(1_500);
   await waitForPerf(page, expectPreview);
@@ -136,6 +143,7 @@ async function captureScenario(page, name, expectPreview, toggles) {
 
   return {
     ...metrics,
+    ...zoomInfo,
     expectPreview,
     screenshot: screenshotPath,
   };
@@ -156,6 +164,27 @@ async function setPerfToggles(page, partial) {
   await page.evaluate((next) => {
     window.__emojiPerfControls?.setToggles(next);
   }, partial);
+}
+
+async function verifyPageZoom(page, zoomFactor) {
+  const effectiveZoom = await page.evaluate(() => ({
+    devicePixelRatio: window.devicePixelRatio,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+  }));
+  const expectedWidth = 1280 / zoomFactor;
+  const expectedHeight = 960 / zoomFactor;
+  const widthOk = Math.abs(effectiveZoom.innerWidth - expectedWidth) <= 64;
+  const heightOk = Math.abs(effectiveZoom.innerHeight - expectedHeight) <= 64;
+  if (!widthOk || !heightOk) {
+    throw new Error(
+      `browser zoom verification failed: requested ${zoomFactor}, observed=${JSON.stringify(effectiveZoom)}`,
+    );
+  }
+  return {
+    requestedZoom: zoomFactor,
+    ...effectiveZoom,
+  };
 }
 
 async function waitForHttp(targetUrl, timeoutMs) {

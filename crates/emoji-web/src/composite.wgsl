@@ -1,4 +1,4 @@
-struct CompositeUniforms {
+struct Uniforms {
     output_size: vec2f,
     time_secs: f32,
     preview_mix: f32,
@@ -11,7 +11,7 @@ struct CompositeUniforms {
 
 @group(0) @binding(0) var overlay_tex: texture_2d<f32>;
 @group(0) @binding(1) var overlay_sampler: sampler;
-@group(0) @binding(2) var<uniform> u: CompositeUniforms;
+@group(0) @binding(2) var<uniform> u: Uniforms;
 @group(0) @binding(3) var billboard_tex: texture_2d<f32>;
 @group(0) @binding(4) var billboard_sampler: sampler;
 
@@ -103,46 +103,16 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4f {
-    let frag_px = in.uv * u.output_size;
-    let bg_t = clamp(length((frag_px - u.output_size * 0.5) / u.output_size), 0.0, 1.0);
-    let gallery_bg = mix(vec3f(0.01, 0.06, 0.03), vec3f(0.0, 0.0, 0.0), bg_t);
-    let preview_bg = mix(vec3f(0.015, 0.015, 0.02), vec3f(0.0, 0.0, 0.0), bg_t);
-    var color = mix(gallery_bg, preview_bg, u.preview_mix);
-
-    let term_local = frag_px - u.terminal_rect.xy;
-    let term_uv = vec2f(
-        clamp(term_local.x / max(u.terminal_rect.z, 1.0), 0.0, 1.0),
-        clamp(term_local.y / max(u.terminal_rect.w, 1.0), 0.0, 1.0),
-    );
-    let in_term = f32(
-        term_local.x >= 0.0 && term_local.y >= 0.0
-        && term_local.x < u.terminal_rect.z && term_local.y < u.terminal_rect.w
-    );
-    let local = frag_px - u.billboard_rect.xy;
-    let bb_uv = vec2f(
-        clamp(local.x / max(u.billboard_rect.z, 1.0), 0.0, 1.0),
-        1.0 - clamp(local.y / max(u.billboard_rect.w, 1.0), 0.0, 1.0),
-    );
-    let inside = f32(
-        u.billboard_rect.z > 0.0 && u.billboard_rect.w > 0.0
-        && local.x >= 0.0 && local.y >= 0.0
-        && local.x < u.billboard_rect.z && local.y < u.billboard_rect.w
-    );
-    if inside > 0.0 && u.preview_mix > 0.0 {
-        let bb = sample_billboard_scene(bb_uv);
-        color = mix(color, bb, inside * u.preview_mix);
-    }
-    if in_term > 0.0 {
-        let overlay_texel = 1.0 / vec2f(textureDimensions(overlay_tex));
-        var overlay = textureSampleLevel(overlay_tex, overlay_sampler, term_uv, 0.0);
-        if u.perf_toggles.z > 0.5 {
-            overlay = sample_filtered(overlay_tex, overlay_sampler, term_uv, overlay_texel * 0.65);
-        }
-        color = mix(color, overlay.rgb, overlay.a * in_term);
+fn fs_screen(in: VsOut) -> @location(0) vec4f {
+    let term_uv = clamp(in.uv, vec2f(0.0), vec2f(1.0));
+    let overlay_texel = 1.0 / vec2f(textureDimensions(overlay_tex));
+    var overlay = textureSampleLevel(overlay_tex, overlay_sampler, term_uv, 0.0);
+    if u.perf_toggles.z > 0.5 {
+        overlay = sample_filtered(overlay_tex, overlay_sampler, term_uv, overlay_texel * 0.65);
     }
 
-    if in_term > 0.0 && u.perf_toggles.x > 0.5 {
+    var color = overlay.rgb;
+    if u.perf_toggles.x > 0.5 {
         let switch_phase = 1.0 - abs(u.preview_mix * 2.0 - 1.0);
         let switching = f32(u.preview_mix > 0.001 && u.preview_mix < 0.999);
         let crt_strength = 1.0 - u.preview_mix;
@@ -173,8 +143,45 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
     }
 
     color = clamp(color, vec3f(0.0), vec3f(1.0));
-    if in_term > 0.0 && u.perf_toggles.y > 0.5 {
+    if u.perf_toggles.y > 0.5 {
         color = apply_transfer_tuning(color);
     }
+
+    return vec4f(color, overlay.a);
+}
+
+@fragment
+fn fs_composite(in: VsOut) -> @location(0) vec4f {
+    let frag_px = in.uv * u.output_size;
+    let bg_t = clamp(length((frag_px - u.output_size * 0.5) / u.output_size), 0.0, 1.0);
+    let gallery_bg = mix(vec3f(0.01, 0.06, 0.03), vec3f(0.0, 0.0, 0.0), bg_t);
+    let preview_bg = mix(vec3f(0.015, 0.015, 0.02), vec3f(0.0, 0.0, 0.0), bg_t);
+    var color = mix(gallery_bg, preview_bg, u.preview_mix);
+
+    let local = frag_px - u.billboard_rect.xy;
+    let bb_uv = vec2f(
+        clamp(local.x / max(u.billboard_rect.z, 1.0), 0.0, 1.0),
+        1.0 - clamp(local.y / max(u.billboard_rect.w, 1.0), 0.0, 1.0),
+    );
+    let inside = u.billboard_rect.z > 0.0 && u.billboard_rect.w > 0.0
+        && local.x >= 0.0 && local.y >= 0.0
+        && local.x < u.billboard_rect.z && local.y < u.billboard_rect.w;
+    if inside && u.preview_mix > 0.0 {
+        let bb = sample_billboard_scene(bb_uv);
+        color = mix(color, bb, u.preview_mix);
+    }
+
+    let term_local = frag_px - u.terminal_rect.xy;
+    let term_uv = vec2f(
+        clamp(term_local.x / max(u.terminal_rect.z, 1.0), 0.0, 1.0),
+        clamp(term_local.y / max(u.terminal_rect.w, 1.0), 0.0, 1.0),
+    );
+    let in_term = term_local.x >= 0.0 && term_local.y >= 0.0
+        && term_local.x < u.terminal_rect.z && term_local.y < u.terminal_rect.w;
+    if in_term {
+        let screen = textureSampleLevel(overlay_tex, overlay_sampler, term_uv, 0.0);
+        color = mix(color, screen.rgb, screen.a);
+    }
+
     return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
 }
