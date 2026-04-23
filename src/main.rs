@@ -10,7 +10,7 @@ mod state;
 mod testing;
 mod ui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::info;
 
 #[tokio::main]
@@ -35,20 +35,38 @@ async fn main() -> Result<()> {
 
     info!("Starting slackslack...");
 
-    // Check for manual token override via environment
-    let creds = if let (Ok(token), Ok(cookie)) =
-        (std::env::var("SLACK_TOKEN"), std::env::var("SLACK_COOKIE"))
-    {
-        info!("Using credentials from environment variables");
-        auth::Credentials { token, cookie }
-    } else {
-        info!("Extracting credentials from Slack desktop app...");
-        auth::extract_credentials()?
-    };
+    let candidates = auth::credential_candidates()?;
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "No Slack credentials found.\n\
+             Tried environment, cached credentials, Slack desktop, and Chromium-family browser profiles."
+        );
+    }
 
-    // Validate credentials
-    let client = slack::client::SlackClient::new(&creds)?;
-    let auth = client.auth_test().await?;
+    let mut selected = None;
+    for candidate in candidates {
+        info!("Trying Slack credentials from {}", candidate.label);
+        let client = match slack::client::SlackClient::new(&candidate.credentials) {
+            Ok(client) => client,
+            Err(err) => {
+                info!("Skipping {}: {}", candidate.label, err);
+                continue;
+            }
+        };
+        match client.auth_test().await {
+            Ok(auth) => {
+                info!("Authenticated with credentials from {}", candidate.label);
+                auth::save_credentials(&candidate.credentials).ok();
+                selected = Some((client, auth));
+                break;
+            }
+            Err(err) => {
+                info!("Credential source {} failed auth_test: {}", candidate.label, err);
+            }
+        }
+    }
+
+    let (client, auth) = selected.context("Failed to authenticate with any discovered Slack credentials")?;
 
     info!(
         "Authenticated as {} ({}) on {}",
