@@ -13,7 +13,7 @@ wasm-opt = false
 emoji-renderer = { path = "../emoji-renderer" }
 ratatui = { version = "0.30", default-features = false, features = ["underline-color"] }
 fontdue = "0.9"
-wgpu = "24"
+wgpu = { version = "24", features = ["webgl"] }
 egui = "0.31"
 egui-wgpu = "0.31"
 bytemuck = { version = "1", features = ["derive"] }

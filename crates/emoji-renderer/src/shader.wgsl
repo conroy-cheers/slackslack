@@ -146,6 +146,11 @@ fn fs_shadow(@builtin(position) pos: vec4f) -> SceneOutput {
     return out;
 }
 
+@fragment
+fn fs_shadow_color(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    return vec4f(0.0, 0.0, 0.0, 0.45);
+}
+
 struct GroundVertexOutput {
     @builtin(position) position: vec4f,
     @location(0) world_xz: vec2f,

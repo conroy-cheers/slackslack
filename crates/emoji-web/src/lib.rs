@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use emoji_renderer::decode::decode_emoji_frames;
-use emoji_renderer::gpu::{emoji_preview_scene_params, GpuRenderer};
+use emoji_renderer::gpu::{GpuRenderer, emoji_preview_scene_params};
 use emoji_renderer::texture::Texture;
 use emoji_renderer::texture::{COLOR_SOURCE_ALPHA_THRESHOLD, fill_transparent_rgb_from_nearest};
 use js_sys::{Object, Reflect};
@@ -20,8 +20,10 @@ mod terminal_renderer;
 use terminal_renderer::{TERM_COLS, TERM_ROWS, TerminalGrid, TerminalRenderer};
 
 const COMPOSITE_SHADER: &str = include_str!("composite.wgsl");
-const BLIT_SHADER: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../emoji-renderer/src/present_blit.wgsl"));
+const BLIT_SHADER: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../emoji-renderer/src/present_blit.wgsl"
+));
 
 #[derive(Clone, Copy, PartialEq)]
 struct TransferTuning {
@@ -266,11 +268,74 @@ fn debug_log(message: &str) {
     web_sys::console::log_1(&format!("[ultramoji-viewer-4d-rs] {message}").into());
 }
 
+fn required_limits_for_adapter(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let adapter_limits = adapter.limits();
+    let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+        wgpu::Limits::downlevel_webgl2_defaults()
+    } else {
+        wgpu::Limits::default()
+    };
+    base_limits
+        .using_resolution(adapter_limits.clone())
+        .using_alignment(adapter_limits)
+}
+
+fn show_startup_error(message: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(body) = document.body() else {
+        return;
+    };
+
+    let overlay = document.get_element_by_id("loading").unwrap_or_else(|| {
+        let element = document
+            .create_element("div")
+            .expect("failed to create startup error overlay");
+        element
+            .set_attribute("id", "loading")
+            .expect("failed to set startup error overlay id");
+        body.append_child(&element)
+            .expect("failed to append startup error overlay");
+        element
+    });
+
+    overlay.set_text_content(Some(message));
+    let _ = overlay.set_attribute(
+        "style",
+        concat!(
+            "position:absolute;",
+            "inset:0;",
+            "display:flex;",
+            "align-items:center;",
+            "justify-content:center;",
+            "padding:24px;",
+            "background:#0c121c;",
+            "color:#ff8a65;",
+            "font:16px/1.5 monospace;",
+            "text-align:left;",
+            "white-space:pre-wrap;",
+            "z-index:10;"
+        ),
+    );
+}
+
 async fn run() {
     let app = match App::init().await {
         Ok(app) => app,
         Err(err) => {
             web_sys::console::error_1(&format!("init failed: {err}").into());
+            show_startup_error(&format!(
+                "Browser GPU initialization failed.\n\
+                 {err}\n\n\
+                 WebGPU was attempted first, with WebGL2 fallback when available.\n\
+                 If you want to force Chromium's Linux WebGPU path, relaunch with:\n\
+                 chromium --enable-unsafe-webgpu --ignore-gpu-blocklist \\\n\
+                   --enable-features=Vulkan,UseSkiaRenderer --use-angle=vulkan"
+            ));
             return;
         }
     };
@@ -319,11 +384,12 @@ async fn run() {
     {
         let app_ref = app.clone();
         let canvas = app.borrow().canvas.clone();
-        let mousemove = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
-            if let Ok(mut app) = app_ref.try_borrow_mut() {
-                app.handle_mouse_move(event);
-            }
-        }));
+        let mousemove =
+            Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
+                if let Ok(mut app) = app_ref.try_borrow_mut() {
+                    app.handle_mouse_move(event);
+                }
+            }));
         canvas
             .add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())
             .unwrap();
@@ -347,12 +413,13 @@ async fn run() {
     {
         let app_ref = app.clone();
         let canvas = app.borrow().canvas.clone();
-        let mousedown = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
-            event.prevent_default();
-            if let Ok(mut app) = app_ref.try_borrow_mut() {
-                app.handle_mouse_down(event);
-            }
-        }));
+        let mousedown =
+            Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
+                event.prevent_default();
+                if let Ok(mut app) = app_ref.try_borrow_mut() {
+                    app.handle_mouse_down(event);
+                }
+            }));
         canvas
             .add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref())
             .unwrap();
@@ -406,14 +473,7 @@ async fn run() {
 
     let window2 = web_sys::window().unwrap();
     window2
-        .request_animation_frame(
-            cb_clone
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unchecked_ref(),
-        )
+        .request_animation_frame(cb_clone.borrow().as_ref().unwrap().as_ref().unchecked_ref())
         .unwrap();
 }
 
@@ -649,8 +709,7 @@ impl App {
             if self.preview_asset_name.is_some() {
                 debug_log(&format!(
                     "clearing preview asset due to name mismatch: asset={:?} current={:?}",
-                    self.preview_asset_name,
-                    current_name
+                    self.preview_asset_name, current_name
                 ));
             }
             self.preview_asset_name = None;
@@ -780,10 +839,11 @@ impl App {
             .unwrap();
         let render_config = RENDER_CONFIG.with(|cfg| *cfg.borrow());
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::BROWSER_WEBGPU,
+        let instance_desc = wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
             ..Default::default()
-        });
+        };
+        let instance = wgpu::util::new_instance_with_webgpu_detection(&instance_desc).await;
 
         let surface_target = wgpu::SurfaceTarget::Canvas(canvas.clone());
         let surface = instance.create_surface(surface_target)?;
@@ -795,35 +855,51 @@ impl App {
                 compatible_surface: Some(&surface),
             })
             .await
-            .ok_or_else(|| anyhow::anyhow!("no WebGPU adapter"))?;
+            .ok_or_else(|| anyhow::anyhow!("no WebGPU or WebGL2 adapter"))?;
 
-        let adapter_limits = adapter.limits();
+        let adapter_info = adapter.get_info();
+        let downlevel_caps = adapter.get_downlevel_capabilities();
+        debug_log(&format!(
+            "adapter selected: backend={:?} name={} webgpu_compliant={}",
+            adapter_info.backend,
+            adapter_info.name,
+            downlevel_caps.is_webgpu_compliant()
+        ));
+
+        let required_limits = required_limits_for_adapter(&adapter);
         let features = wgpu::Features::empty();
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("emoji_web"),
                     required_features: features,
-                    required_limits: adapter_limits,
+                    required_limits,
                     ..Default::default()
                 },
                 None,
             )
             .await?;
 
-        let linear_depth_format =
-            if adapter
-                .get_texture_format_features(wgpu::TextureFormat::R32Float)
-                .allowed_usages
-                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
-            {
-                wgpu::TextureFormat::R32Float
-            } else {
-                wgpu::TextureFormat::R16Float
-            };
+        let linear_depth_format = if adapter
+            .get_texture_format_features(wgpu::TextureFormat::R32Float)
+            .allowed_usages
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        {
+            wgpu::TextureFormat::R32Float
+        } else {
+            wgpu::TextureFormat::R16Float
+        };
+        let independent_blend_supported = downlevel_caps
+            .flags
+            .contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND);
 
-        let renderer =
-            GpuRenderer::from_device_queue(device, queue, features, linear_depth_format)?;
+        let renderer = GpuRenderer::from_device_queue(
+            device,
+            queue,
+            features,
+            linear_depth_format,
+            independent_blend_supported,
+        )?;
 
         let caps = surface.get_capabilities(&adapter);
         let format = preferred_surface_format(&caps.formats);
@@ -885,15 +961,12 @@ impl App {
                     ],
                 });
 
-        let screen_uniform_buffer =
-            renderer
-                .device()
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("screen_uniforms"),
-                    size: std::mem::size_of::<CompositeUniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+        let screen_uniform_buffer = renderer.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screen_uniforms"),
+            size: std::mem::size_of::<CompositeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let screen_pipeline_layout =
             renderer
@@ -956,15 +1029,12 @@ impl App {
                     ],
                 });
 
-        let composite_uniform_buffer =
-            renderer
-                .device()
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("composite_uniforms"),
-                    size: std::mem::size_of::<CompositeUniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+        let composite_uniform_buffer = renderer.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite_uniforms"),
+            size: std::mem::size_of::<CompositeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let pipeline_layout =
             renderer
@@ -1031,14 +1101,12 @@ impl App {
                     ],
                 });
         let billboard_blit_uniform_buffer =
-            renderer
-                .device()
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("billboard_blit_uniforms"),
-                    size: std::mem::size_of::<BlitUniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+            renderer.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("billboard_blit_uniforms"),
+                size: std::mem::size_of::<BlitUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
         let blit_pipeline_layout =
             renderer
                 .device()
@@ -1076,95 +1144,79 @@ impl App {
                     cache: None,
                 });
 
-        let overlay_sampler_linear =
-            renderer
-                .device()
-                .create_sampler(&wgpu::SamplerDescriptor {
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                    ..Default::default()
-                });
-        let overlay_sampler_nearest =
-            renderer
-                .device()
-                .create_sampler(&wgpu::SamplerDescriptor {
-                    mag_filter: wgpu::FilterMode::Nearest,
-                    min_filter: wgpu::FilterMode::Nearest,
-                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                    ..Default::default()
-                });
+        let overlay_sampler_linear = renderer.device().create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let overlay_sampler_nearest = renderer.device().create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
 
         let billboard_sampler_nearest =
-            renderer
-                .device()
-                .create_sampler(&wgpu::SamplerDescriptor {
-                    mag_filter: wgpu::FilterMode::Nearest,
-                    min_filter: wgpu::FilterMode::Nearest,
-                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                    ..Default::default()
-                });
-        let billboard_sampler_linear =
-            renderer
-                .device()
-                .create_sampler(&wgpu::SamplerDescriptor {
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                    ..Default::default()
-                });
+            renderer.device().create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            });
+        let billboard_sampler_linear = renderer.device().create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
 
         let terminal_renderer = TerminalRenderer::new(renderer.device(), renderer.queue())?;
         let terminal_grid = TerminalGrid::new();
         let (_placeholder_billboard_tex, placeholder_billboard_view) =
             create_rgba_texture(renderer.device(), 1, 1);
-        let (billboard_effect_texture, billboard_effect_view) = create_render_target_texture(
-            renderer.device(),
-            1,
-            1,
-            "billboard_effect_texture",
-        );
+        let (billboard_effect_texture, billboard_effect_view) =
+            create_render_target_texture(renderer.device(), 1, 1, "billboard_effect_texture");
         let (screen_texture, screen_texture_view) = create_render_target_texture(
             renderer.device(),
             terminal_renderer.pixel_width(),
             terminal_renderer.pixel_height(),
             "screen_effect_texture",
         );
-        let screen_bind_group =
-            renderer
-                .device()
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("screen_bg"),
-                    layout: &screen_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(
-                                terminal_renderer.texture_view(),
-                            ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: screen_uniform_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&placeholder_billboard_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
-                        },
-                    ],
-                });
+        let screen_bind_group = renderer
+            .device()
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("screen_bg"),
+                layout: &screen_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            terminal_renderer.texture_view(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: screen_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&placeholder_billboard_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
+                    },
+                ],
+            });
         let composite_bind_group =
             renderer
                 .device()
@@ -1187,7 +1239,7 @@ impl App {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: wgpu::BindingResource::TextureView(&billboard_effect_view),
-                            },
+                        },
                         wgpu::BindGroupEntry {
                             binding: 4,
                             resource: wgpu::BindingResource::Sampler(&billboard_sampler_linear),
@@ -1203,7 +1255,9 @@ impl App {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&placeholder_billboard_view),
+                            resource: wgpu::BindingResource::TextureView(
+                                &placeholder_billboard_view,
+                            ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -1465,8 +1519,12 @@ impl App {
         let mut panel_actions = egui_panel::PanelActions::default();
         let panel_response = self.egui_ctx.run(egui_raw_input, |ctx| {
             if self.settings_visible {
-                panel_actions =
-                    egui_panel::show_controls_panel(ctx, &mut transfer, &mut render_config, full_perf);
+                panel_actions = egui_panel::show_controls_panel(
+                    ctx,
+                    &mut transfer,
+                    &mut render_config,
+                    full_perf,
+                );
             }
         });
         if panel_actions.sign_out_requested {
@@ -1477,8 +1535,12 @@ impl App {
         let textures_delta_set_count = panel_response.textures_delta.set.len();
         let textures_delta_free_count = panel_response.textures_delta.free.len();
         for (id, delta) in &panel_response.textures_delta.set {
-            self.egui_renderer
-                .update_texture(self.renderer.device(), self.renderer.queue(), *id, delta);
+            self.egui_renderer.update_texture(
+                self.renderer.device(),
+                self.renderer.queue(),
+                *id,
+                delta,
+            );
         }
         TRANSFER_TUNING.with(|t| *t.borrow_mut() = transfer);
         RENDER_CONFIG.with(|cfg| *cfg.borrow_mut() = render_config);
@@ -1528,8 +1590,11 @@ impl App {
         let term_start = perf.now();
         if self.terminal_dirty {
             gallery::render_to_grid(&mut self.terminal_grid, &self.gallery, time_secs);
-            self.terminal_renderer
-                .render(self.renderer.device(), self.renderer.queue(), &self.terminal_grid);
+            self.terminal_renderer.render(
+                self.renderer.device(),
+                self.renderer.queue(),
+                &self.terminal_grid,
+            );
             self.terminal_dirty = false;
             self.screen_dirty = true;
         }
@@ -1582,8 +1647,11 @@ impl App {
                     params.render_scale = Some(render_config.preview_render_scale);
                     let current_preview_name = self.gallery.current_entry_name();
                     if self.preview_error_name.as_deref() == current_preview_name {
-                        let error_pixels =
-                            render_preview_error_pixels(render_w, render_h, preview_scene_time_secs);
+                        let error_pixels = render_preview_error_pixels(
+                            render_w,
+                            render_h,
+                            preview_scene_time_secs,
+                        );
                         self.renderer.render_to_offscreen_params(
                             &Texture {
                                 pixels: &error_pixels,
@@ -1708,7 +1776,11 @@ impl App {
                 perf_toggles: [
                     if perf_toggles.crt { 1.0 } else { 0.0 },
                     if perf_toggles.transfer { 1.0 } else { 0.0 },
-                    if perf_toggles.overlay_filter && render_config.overlay_filter { 1.0 } else { 0.0 },
+                    if perf_toggles.overlay_filter && render_config.overlay_filter {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     0.0,
                 ],
                 channel_switch: [
@@ -1800,7 +1872,11 @@ impl App {
             perf_toggles: [
                 if perf_toggles.crt { 1.0 } else { 0.0 },
                 if perf_toggles.transfer { 1.0 } else { 0.0 },
-                if perf_toggles.overlay_filter && render_config.overlay_filter { 1.0 } else { 0.0 },
+                if perf_toggles.overlay_filter && render_config.overlay_filter {
+                    1.0
+                } else {
+                    0.0
+                },
                 if perf_toggles.billboard { 1.0 } else { 0.0 },
             ],
             channel_switch: [
@@ -2336,7 +2412,9 @@ impl App {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.billboard_sampler_linear),
+                                resource: wgpu::BindingResource::Sampler(
+                                    &self.billboard_sampler_linear,
+                                ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
@@ -2382,7 +2460,9 @@ impl App {
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&self.placeholder_billboard_view),
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.placeholder_billboard_view,
+                            ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
