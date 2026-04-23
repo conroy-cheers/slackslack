@@ -3,6 +3,7 @@ struct Uniforms {
     time_secs: f32,
     preview_mix: f32,
     terminal_rect: vec4f,
+    overlay_uv_rect: vec4f,
     billboard_rect: vec4f,
     terminal_grid: vec4f,
     transfer_tuning: vec4f,
@@ -161,7 +162,7 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
     let local = frag_px - u.billboard_rect.xy;
     let bb_uv = vec2f(
         clamp(local.x / max(u.billboard_rect.z, 1.0), 0.0, 1.0),
-        1.0 - clamp(local.y / max(u.billboard_rect.w, 1.0), 0.0, 1.0),
+        clamp(local.y / max(u.billboard_rect.w, 1.0), 0.0, 1.0),
     );
     let inside = u.billboard_rect.z > 0.0 && u.billboard_rect.w > 0.0
         && local.x >= 0.0 && local.y >= 0.0
@@ -172,10 +173,11 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
     }
 
     let term_local = frag_px - u.terminal_rect.xy;
-    let term_uv = vec2f(
+    let term_local_uv = vec2f(
         clamp(term_local.x / max(u.terminal_rect.z, 1.0), 0.0, 1.0),
         clamp(term_local.y / max(u.terminal_rect.w, 1.0), 0.0, 1.0),
     );
+    let term_uv = u.overlay_uv_rect.xy + term_local_uv * u.overlay_uv_rect.zw;
     let in_term = term_local.x >= 0.0 && term_local.y >= 0.0
         && term_local.x < u.terminal_rect.z && term_local.y < u.terminal_rect.w;
     if in_term {

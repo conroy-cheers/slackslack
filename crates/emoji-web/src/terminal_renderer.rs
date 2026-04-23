@@ -30,6 +30,14 @@ pub struct TerminalGrid {
     cells: Vec<TerminalCell>,
 }
 
+#[derive(Clone, Copy)]
+pub struct OccupiedRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
 impl TerminalGrid {
     pub fn new() -> Self {
         Self {
@@ -75,6 +83,36 @@ impl TerminalGrid {
 
     pub fn cells(&self) -> &[TerminalCell] {
         &self.cells
+    }
+
+    pub fn occupied_rect(&self) -> Option<OccupiedRect> {
+        let mut min_x = TERM_COLS;
+        let mut min_y = TERM_ROWS;
+        let mut max_x = 0u16;
+        let mut max_y = 0u16;
+        let mut any = false;
+
+        for y in 0..TERM_ROWS {
+            for x in 0..TERM_COLS {
+                let cell = self.cells[y as usize * TERM_COLS as usize + x as usize];
+                let visible = cell.ch != ' ' || cell.fg[3] != 0 || cell.bg[3] != 0;
+                if !visible {
+                    continue;
+                }
+                any = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+
+        any.then_some(OccupiedRect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x + 1,
+            height: max_y - min_y + 1,
+        })
     }
 }
 

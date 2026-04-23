@@ -95,6 +95,15 @@ impl Gallery {
         }
     }
 
+    pub fn enter_preview_immediate(&mut self) {
+        let filtered = self.filtered_entries();
+        if let Some(&(real_index, _)) = filtered.get(self.selected) {
+            self.preview_index = Some(real_index);
+            self.preview_target = 1.0;
+            self.preview_mix = 1.0;
+        }
+    }
+
     pub fn new() -> Self {
         let entries: Vec<EmojiEntry> = [
             "thumbsup",

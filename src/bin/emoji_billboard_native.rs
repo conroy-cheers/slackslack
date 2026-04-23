@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use egui::{Align2, ComboBox};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use egui_winit::State as EguiWinitState;
 use emoji_renderer::gpu::{GpuRenderer, emoji_preview_scene_params};
@@ -28,10 +27,21 @@ mod gallery {
     ));
 }
 
+mod egui_panel {
+    use super::{RenderConfig, TransferTuning};
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/emoji-web/src/egui_panel.rs"
+    ));
+}
+
 use terminal_renderer::{TERM_COLS, TERM_ROWS, TerminalGrid, TerminalRenderer};
 
 const COMPOSITE_SHADER: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/crates/emoji-web/src/composite.wgsl"));
+const BLIT_SHADER: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/crates/emoji-renderer/src/present_blit.wgsl"));
 
 #[derive(Clone, Copy, PartialEq)]
 struct TransferTuning {
@@ -86,10 +96,10 @@ impl Default for RenderConfig {
         Self {
             gallery_canvas_scale: 1.0,
             preview_canvas_scale: 1.0,
-            preview_max_dim: 180,
+            preview_max_dim: 320,
             preview_render_scale: 2.0,
             display_pixelated: false,
-            overlay_filter: true,
+            overlay_filter: false,
         }
     }
 }
@@ -101,10 +111,23 @@ struct CompositeUniforms {
     time_secs: f32,
     preview_mix: f32,
     terminal_rect: [f32; 4],
+    overlay_uv_rect: [f32; 4],
     billboard_rect: [f32; 4],
     terminal_grid: [f32; 4],
     transfer_tuning: [f32; 4],
     perf_toggles: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlitUniforms {
+    output_size: [f32; 2],
+    opacity: f32,
+    apply_transfer: f32,
+    dest_rect: [f32; 4],
+    uv_rect: [f32; 4],
+    transfer_tuning: [f32; 4],
+    extra_params: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -135,6 +158,7 @@ struct NativePerfSnapshot {
 }
 
 struct NativeBillboardApp {
+    options: RuntimeOptions,
     window: Option<Arc<Window>>,
     renderer: Option<RendererState>,
     exit_error: Option<anyhow::Error>,
@@ -147,7 +171,53 @@ enum BackendChoice {
     Wayland,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RuntimeOptions {
+    window_width: u32,
+    window_height: u32,
+    start_preview: bool,
+    show_egui: bool,
+    log_perf: bool,
+    exit_after_secs: Option<f64>,
+}
+
+impl RuntimeOptions {
+    fn from_env() -> Self {
+        fn env_u32(name: &str, default: u32) -> u32 {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(default)
+        }
+
+        fn env_bool(name: &str, default: bool) -> bool {
+            std::env::var(name)
+                .ok()
+                .map(|s| matches!(s.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(default)
+        }
+
+        fn env_f64(name: &str) -> Option<f64> {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|v| *v > 0.0)
+        }
+
+        Self {
+            window_width: env_u32("EMOJI_BILLBOARD_WIDTH", 1280),
+            window_height: env_u32("EMOJI_BILLBOARD_HEIGHT", 960),
+            start_preview: env_bool("EMOJI_BILLBOARD_START_PREVIEW", false),
+            show_egui: env_bool("EMOJI_BILLBOARD_SHOW_EGUI", true),
+            log_perf: env_bool("EMOJI_BILLBOARD_LOG_PERF", false),
+            exit_after_secs: env_f64("EMOJI_BILLBOARD_EXIT_AFTER_SECS"),
+        }
+    }
+}
+
 struct RendererState {
+    options: RuntimeOptions,
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -174,6 +244,16 @@ struct RendererState {
     composite_display_pixelated: bool,
     composite_billboard_generation: u64,
     composite_uniform_buffer: wgpu::Buffer,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_pipeline_opaque: wgpu::RenderPipeline,
+    blit_bind_group_layout: wgpu::BindGroupLayout,
+    blit_billboard_uniform_buffer: wgpu::Buffer,
+    blit_screen_uniform_buffer: wgpu::Buffer,
+    preview_screen_bind_group: wgpu::BindGroup,
+    preview_billboard_bind_group: wgpu::BindGroup,
+    preview_screen_display_pixelated: bool,
+    preview_billboard_display_pixelated: bool,
+    preview_billboard_generation: u64,
 
     overlay_sampler_linear: wgpu::Sampler,
     overlay_sampler_nearest: wgpu::Sampler,
@@ -192,6 +272,10 @@ struct RendererState {
     egui_ctx: egui::Context,
     egui_state: EguiWinitState,
     egui_renderer: EguiRenderer,
+    egui_dirty: bool,
+    last_egui_update_secs: f64,
+    cached_paint_jobs: Vec<egui::epaint::ClippedPrimitive>,
+    cached_screen_descriptor: ScreenDescriptor,
 
     transfer: TransferTuning,
     perf_toggles: PerfToggles,
@@ -202,11 +286,13 @@ struct RendererState {
     last_blink_on: bool,
     last_preview_overlay_visible: bool,
     perf: NativePerfSnapshot,
+    next_perf_log_secs: f64,
 }
 
 impl NativeBillboardApp {
-    fn new() -> Self {
+    fn new(options: RuntimeOptions) -> Self {
         Self {
+            options,
             window: None,
             renderer: None,
             exit_error: None,
@@ -223,7 +309,10 @@ impl ApplicationHandler for NativeBillboardApp {
         let window = match event_loop.create_window(
             WindowAttributes::default()
                 .with_title("Emoji Billboard Native")
-                .with_inner_size(PhysicalSize::new(1280, 960)),
+                .with_inner_size(PhysicalSize::new(
+                    self.options.window_width,
+                    self.options.window_height,
+                )),
         ) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -233,7 +322,7 @@ impl ApplicationHandler for NativeBillboardApp {
             }
         };
 
-        match block_on(RendererState::new(window.clone())) {
+        match block_on(RendererState::new(window.clone(), self.options)) {
             Ok(renderer) => {
                 self.window = Some(window);
                 self.renderer = Some(renderer);
@@ -259,6 +348,7 @@ impl ApplicationHandler for NativeBillboardApp {
         }
 
         if renderer.egui_state.on_window_event(&renderer.window, &event).consumed {
+            renderer.egui_dirty = true;
             renderer.window.request_redraw();
             return;
         }
@@ -278,6 +368,8 @@ impl ApplicationHandler for NativeBillboardApp {
                 if let Err(err) = renderer.frame() {
                     self.exit_error = Some(err);
                     event_loop.exit();
+                } else if renderer.should_exit() {
+                    event_loop.exit();
                 }
             }
             _ => {}
@@ -293,13 +385,13 @@ impl ApplicationHandler for NativeBillboardApp {
 }
 
 impl RendererState {
-    async fn new(window: Arc<Window>) -> Result<Self> {
+    async fn new(window: Arc<Window>, options: RuntimeOptions) -> Result<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: Some(&surface),
             })
@@ -340,10 +432,10 @@ impl RendererState {
             format: surface_format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: preferred_present_mode(&caps.present_modes),
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 1,
         };
         surface.configure(renderer.device(), &config);
 
@@ -474,6 +566,109 @@ impl RendererState {
                     cache: None,
                 });
 
+        let blit_shader = renderer
+            .device()
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("emoji_billboard_native_blit_shader"),
+                source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
+            });
+        let blit_bind_group_layout =
+            renderer
+                .device()
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("blit_bgl"),
+                    entries: &[
+                        bgl_texture(0),
+                        bgl_sampler(1),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+        let blit_billboard_uniform_buffer = renderer.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blit_billboard_uniforms"),
+            size: std::mem::size_of::<BlitUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let blit_screen_uniform_buffer = renderer.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blit_screen_uniforms"),
+            size: std::mem::size_of::<BlitUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let blit_pipeline_layout =
+            renderer
+                .device()
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("blit_pipeline_layout"),
+                    bind_group_layouts: &[&blit_bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+        let blit_pipeline =
+            renderer
+                .device()
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("blit_pipeline"),
+                    layout: Some(&blit_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &blit_shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &blit_shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
+        let blit_pipeline_opaque =
+            renderer
+                .device()
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("blit_pipeline_opaque"),
+                    layout: Some(&blit_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &blit_shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &blit_shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                });
+
         let overlay_sampler_linear = create_sampler(renderer.device(), wgpu::FilterMode::Linear);
         let overlay_sampler_nearest = create_sampler(renderer.device(), wgpu::FilterMode::Nearest);
         let billboard_sampler_linear = create_sampler(renderer.device(), wgpu::FilterMode::Linear);
@@ -549,6 +744,48 @@ impl RendererState {
                         },
                     ],
                 });
+        let preview_screen_bind_group =
+            renderer
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("preview_screen_bg"),
+                    layout: &blit_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&screen_texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&overlay_sampler_linear),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: blit_screen_uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+        let preview_billboard_bind_group =
+            renderer
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("preview_billboard_bg"),
+                    layout: &blit_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&placeholder_billboard_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&billboard_sampler_linear),
+                            },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: blit_billboard_uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
 
         let egui_ctx = egui::Context::default();
         let egui_state = EguiWinitState::new(
@@ -573,8 +810,15 @@ impl RendererState {
         let initial_terminal_width = terminal_renderer.pixel_width();
         let initial_terminal_height = terminal_renderer.pixel_height();
         let initial_scale_factor = window.scale_factor() as f32;
+        let mut gallery = gallery::Gallery::new();
+        let mut terminal_dirty = true;
+        let mut screen_dirty = true;
+        if options.start_preview {
+            gallery.enter_preview_immediate();
+        }
 
         Ok(Self {
+            options,
             window,
             surface,
             config,
@@ -587,7 +831,7 @@ impl RendererState {
             screen_uniform_buffer,
             screen_texture,
             screen_texture_view,
-            screen_dirty: true,
+            screen_dirty,
             last_screen_transfer: transfer,
             last_screen_perf_toggles: perf_toggles,
             last_screen_render_config: render_config,
@@ -599,6 +843,16 @@ impl RendererState {
             composite_display_pixelated: false,
             composite_billboard_generation: 0,
             composite_uniform_buffer,
+            blit_pipeline,
+            blit_pipeline_opaque,
+            blit_bind_group_layout,
+            blit_billboard_uniform_buffer,
+            blit_screen_uniform_buffer,
+            preview_screen_bind_group,
+            preview_billboard_bind_group,
+            preview_screen_display_pixelated: false,
+            preview_billboard_display_pixelated: false,
+            preview_billboard_generation: 0,
             overlay_sampler_linear,
             overlay_sampler_nearest,
             billboard_sampler_linear,
@@ -606,14 +860,21 @@ impl RendererState {
             placeholder_billboard_view,
             terminal_renderer,
             terminal_grid,
-            terminal_dirty: true,
-            gallery: gallery::Gallery::new(),
+            terminal_dirty,
+            gallery,
             demo_pixels,
             demo_w,
             demo_h,
             egui_ctx,
             egui_state,
             egui_renderer,
+            egui_dirty: true,
+            last_egui_update_secs: -1.0,
+            cached_paint_jobs: Vec::new(),
+            cached_screen_descriptor: ScreenDescriptor {
+                size_in_pixels: [initial_surface_width, initial_surface_height],
+                pixels_per_point: initial_scale_factor,
+            },
             transfer,
             perf_toggles,
             render_config,
@@ -633,7 +894,15 @@ impl RendererState {
                 last_screen_redrew: true,
                 ..Default::default()
             },
+            next_perf_log_secs: 1.0,
         })
+    }
+
+    fn should_exit(&self) -> bool {
+        self.options
+            .exit_after_secs
+            .map(|limit| self.start_time.elapsed().as_secs_f64() >= limit)
+            .unwrap_or(false)
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -652,6 +921,7 @@ impl RendererState {
         self.config.width = ((size.width as f32) * scale).round().max(1.0) as u32;
         self.config.height = ((size.height as f32) * scale).round().max(1.0) as u32;
         self.surface.configure(self.renderer.device(), &self.config);
+        self.egui_dirty = true;
     }
 
     fn handle_key_event(&mut self, event: &winit::event::KeyEvent) {
@@ -684,8 +954,6 @@ impl RendererState {
 
     fn frame(&mut self) -> Result<()> {
         let frame_start = Instant::now();
-        let raw_input = self.egui_state.take_egui_input(&self.window);
-
         let now = self.start_time.elapsed().as_secs_f64();
         let dt_secs = (now - self.last_time_secs).max(0.0);
         self.last_time_secs = now;
@@ -708,23 +976,52 @@ impl RendererState {
             self.screen_dirty = true;
         }
 
-        let mut transfer = self.transfer;
-        let mut render_config = self.render_config;
-        let perf = self.perf;
-        let egui_ui_start = Instant::now();
-        let panel_response = self.egui_ctx.run(raw_input, |ctx| {
-            Self::draw_egui(
-                ctx,
-                &mut transfer,
-                &mut render_config,
-                perf,
-            )
-        });
-        let mut egui_ms = egui_ui_start.elapsed().as_secs_f32() * 1000.0;
-        self.transfer = transfer;
-        self.render_config = render_config;
-        self.egui_state
-            .handle_platform_output(&self.window, panel_response.platform_output.clone());
+        let mut egui_ms = 0.0f32;
+        let mut textures_delta_set_count = 0usize;
+        let mut textures_delta_free_count = 0usize;
+        let screen_descriptor = ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+        if self.options.show_egui {
+            let mut transfer = self.transfer;
+            let mut render_config = self.render_config;
+            let perf = self.perf;
+            let egui_refresh_due = (now - self.last_egui_update_secs) >= 0.1;
+            if self.egui_dirty || egui_refresh_due {
+                let raw_input = self.egui_state.take_egui_input(&self.window);
+                let egui_ui_start = Instant::now();
+                let panel_response = self.egui_ctx.run(raw_input, |ctx| {
+                    Self::draw_egui(ctx, &mut transfer, &mut render_config, perf)
+                });
+                egui_ms += egui_ui_start.elapsed().as_secs_f32() * 1000.0;
+                self.transfer = transfer;
+                self.render_config = render_config;
+                self.egui_state
+                    .handle_platform_output(&self.window, panel_response.platform_output.clone());
+                let egui_prepare_start = Instant::now();
+                let paint_jobs = self
+                    .egui_ctx
+                    .tessellate(panel_response.shapes, screen_descriptor.pixels_per_point);
+                textures_delta_set_count = panel_response.textures_delta.set.len();
+                textures_delta_free_count = panel_response.textures_delta.free.len();
+                for (id, delta) in &panel_response.textures_delta.set {
+                    self.egui_renderer
+                        .update_texture(self.renderer.device(), self.renderer.queue(), *id, delta);
+                }
+                self.cached_paint_jobs = paint_jobs;
+                self.cached_screen_descriptor = screen_descriptor;
+                self.last_egui_update_secs = now;
+                self.egui_dirty = false;
+                egui_ms += egui_prepare_start.elapsed().as_secs_f32() * 1000.0;
+                for id in &panel_response.textures_delta.free {
+                    self.egui_renderer.free_texture(id);
+                }
+            }
+        } else {
+            self.cached_paint_jobs.clear();
+            self.cached_screen_descriptor = screen_descriptor;
+        }
 
         let desired_surface_scale = if self.gallery.is_previewing() {
             self.render_config.preview_canvas_scale
@@ -761,46 +1058,35 @@ impl RendererState {
         let overlay_h = self.terminal_renderer.pixel_height();
         let scene_start = Instant::now();
         let billboard_pixel_rect: [f32; 4] = if previewing && self.perf_toggles.billboard {
-            if let Some(cell_rect) = self.gallery.billboard_cell_rect(TERM_COLS, TERM_ROWS) {
-                let native_w = cell_rect.width as f32;
-                let native_h = (cell_rect.height as f32) * 2.0;
-                let target_max_dim = self.render_config.preview_max_dim as f32;
-                let native_max = native_w.max(native_h).max(1.0);
-                let scale = target_max_dim / native_max;
-                let render_w = (native_w * scale).round().max(1.0) as u32;
-                let render_h = (native_h * scale).round().max(1.0) as u32;
+            let canvas_w = self.config.width.max(1) as f32;
+            let canvas_h = self.config.height.max(1) as f32;
+            let target_max_dim = self.render_config.preview_max_dim as f32;
+            let canvas_max = canvas_w.max(canvas_h).max(1.0);
+            let scale = target_max_dim / canvas_max;
+            let render_w = (canvas_w * scale).round().max(1.0) as u32;
+            let render_h = (canvas_h * scale).round().max(1.0) as u32;
 
-                let texture = emoji_renderer::texture::Texture {
-                    pixels: &self.demo_pixels,
-                    width: self.demo_w,
-                    height: self.demo_h,
-                };
-                let mut params = emoji_preview_scene_params();
-                params.sharpen = Some(0.1);
-                params.dither = Some(0.3);
-                params.vhs = Some(0.5);
-                params.jitter = Some(0.1);
-                params.supersample = true;
-                params.render_scale = Some(self.render_config.preview_render_scale);
-                self.renderer.render_to_offscreen_params(
-                    &texture,
-                    render_w,
-                    render_h,
-                    now,
-                    &params,
-                )?;
+            let texture = emoji_renderer::texture::Texture {
+                pixels: &self.demo_pixels,
+                width: self.demo_w,
+                height: self.demo_h,
+            };
+            let mut params = emoji_preview_scene_params();
+            params.sharpen = Some(0.1);
+            params.dither = Some(0.3);
+            params.vhs = Some(0.5);
+            params.jitter = Some(0.1);
+            params.supersample = true;
+            params.render_scale = Some(self.render_config.preview_render_scale);
+            self.renderer.render_to_offscreen_params(
+                &texture,
+                render_w,
+                render_h,
+                now,
+                &params,
+            )?;
 
-                let cell_px_w = overlay_w as f32 / TERM_COLS as f32;
-                let cell_px_h = overlay_h as f32 / TERM_ROWS as f32;
-                [
-                    cell_rect.x as f32 * cell_px_w,
-                    cell_rect.y as f32 * cell_px_h,
-                    cell_rect.width as f32 * cell_px_w,
-                    cell_rect.height as f32 * cell_px_h,
-                ]
-            } else {
-                [0.0; 4]
-            }
+            [0.0, 0.0, canvas_w, canvas_h]
         } else {
             [0.0; 4]
         };
@@ -814,6 +1100,7 @@ impl RendererState {
                 time_secs: now as f32,
                 preview_mix,
                 terminal_rect: [0.0; 4],
+                overlay_uv_rect: [0.0, 0.0, 1.0, 1.0],
                 billboard_rect: [0.0; 4],
                 terminal_grid: [
                     TERM_COLS as f32,
@@ -877,6 +1164,12 @@ impl RendererState {
         let screen_ms = screen_start.elapsed().as_secs_f32() * 1000.0;
         self.perf.last_screen_redrew = screen_redrew;
 
+        let preview_overlay_bounds = if previewing {
+            self.terminal_grid.occupied_rect()
+        } else {
+            None
+        };
+
         let term_aspect = overlay_w as f32 / overlay_h as f32;
         let canvas_aspect = self.config.width as f32 / self.config.height as f32;
         let (term_w, term_h) = if canvas_aspect > term_aspect {
@@ -888,22 +1181,51 @@ impl RendererState {
         };
         let term_x = (self.config.width as f32 - term_w) * 0.5;
         let term_y = (self.config.height as f32 - term_h) * 0.5;
-        let terminal_rect = [term_x, term_y, term_w, term_h];
+        let (terminal_rect, overlay_uv_rect) = if let Some(bounds) = preview_overlay_bounds {
+            let cell_w = term_w / TERM_COLS as f32;
+            let cell_h = term_h / TERM_ROWS as f32;
+            (
+                [
+                    term_x + bounds.x as f32 * cell_w,
+                    term_y + bounds.y as f32 * cell_h,
+                    bounds.width as f32 * cell_w,
+                    bounds.height as f32 * cell_h,
+                ],
+                [
+                    bounds.x as f32 / TERM_COLS as f32,
+                    bounds.y as f32 / TERM_ROWS as f32,
+                    bounds.width as f32 / TERM_COLS as f32,
+                    bounds.height as f32 / TERM_ROWS as f32,
+                ],
+            )
+        } else {
+            ([term_x, term_y, term_w, term_h], [0.0, 0.0, 1.0, 1.0])
+        };
 
         let sx = term_w / overlay_w as f32;
         let sy = term_h / overlay_h as f32;
-        let billboard_canvas_rect = [
-            term_x + billboard_pixel_rect[0] * sx,
-            term_y + billboard_pixel_rect[1] * sy,
-            billboard_pixel_rect[2] * sx,
-            billboard_pixel_rect[3] * sy,
-        ];
+        let billboard_canvas_rect = if previewing {
+            [
+                billboard_pixel_rect[0],
+                billboard_pixel_rect[1],
+                billboard_pixel_rect[2],
+                billboard_pixel_rect[3],
+            ]
+        } else {
+            [
+                term_x + billboard_pixel_rect[0] * sx,
+                term_y + billboard_pixel_rect[1] * sy,
+                billboard_pixel_rect[2] * sx,
+                billboard_pixel_rect[3] * sy,
+            ]
+        };
 
         let uniforms = CompositeUniforms {
             output_size: [self.config.width as f32, self.config.height as f32],
             time_secs: now as f32,
             preview_mix,
             terminal_rect,
+            overlay_uv_rect,
             billboard_rect: billboard_canvas_rect,
             terminal_grid: [
                 TERM_COLS as f32,
@@ -948,19 +1270,6 @@ impl RendererState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let screen_descriptor = ScreenDescriptor {
-            size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point: self.window.scale_factor() as f32,
-        };
-        let egui_prepare_start = Instant::now();
-        let paint_jobs = self
-            .egui_ctx
-            .tessellate(panel_response.shapes, screen_descriptor.pixels_per_point);
-        for (id, delta) in &panel_response.textures_delta.set {
-            self.egui_renderer
-                .update_texture(self.renderer.device(), self.renderer.queue(), *id, delta);
-        }
-
         let composite_start = Instant::now();
         let mut encoder =
             self.renderer
@@ -968,14 +1277,30 @@ impl RendererState {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("native_composite_encoder"),
                 });
-        self.egui_renderer.update_buffers(
-            self.renderer.device(),
-            self.renderer.queue(),
-            &mut encoder,
-            &paint_jobs,
-            &screen_descriptor,
-        );
-        egui_ms += egui_prepare_start.elapsed().as_secs_f32() * 1000.0;
+        if self.options.show_egui {
+            self.egui_renderer.update_buffers(
+                self.renderer.device(),
+                self.renderer.queue(),
+                &mut encoder,
+                &self.cached_paint_jobs,
+                &self.cached_screen_descriptor,
+            );
+        }
+        let clear = if preview_mix > 0.0 {
+            wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }
+        } else {
+            wgpu::Color {
+                r: 0.0,
+                g: 0.03,
+                b: 0.01,
+                a: 1.0,
+            }
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("native_composite_pass"),
@@ -983,17 +1308,72 @@ impl RendererState {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
-            pass.set_pipeline(&self.composite_pipeline);
-            pass.set_bind_group(0, &self.composite_bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            if preview_mix > 0.0 {
+                self.ensure_preview_blit_bind_groups(
+                    self.render_config.display_pixelated,
+                    self.renderer.render_target_generation(),
+                );
+
+                if uses_billboard {
+                    let uniforms = BlitUniforms {
+                        output_size: [self.config.width as f32, self.config.height as f32],
+                        opacity: preview_mix,
+                        apply_transfer: 1.0,
+                        dest_rect: billboard_canvas_rect,
+                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                        transfer_tuning: [
+                            self.transfer.linear_gain,
+                            self.transfer.gamma,
+                            self.transfer.lift,
+                            self.transfer.saturation,
+                        ],
+                        extra_params: [1.0, 0.0, 0.0, 0.0],
+                    };
+                    self.renderer.queue().write_buffer(
+                        &self.blit_billboard_uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(&uniforms),
+                    );
+                    let billboard_pipeline = if preview_mix >= 0.999 {
+                        &self.blit_pipeline_opaque
+                    } else {
+                        &self.blit_pipeline
+                    };
+                    pass.set_pipeline(billboard_pipeline);
+                    pass.set_bind_group(0, &self.preview_billboard_bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
+
+                let screen_uniforms = BlitUniforms {
+                    output_size: [self.config.width as f32, self.config.height as f32],
+                    opacity: 1.0,
+                    apply_transfer: 0.0,
+                    dest_rect: terminal_rect,
+                    uv_rect: overlay_uv_rect,
+                    transfer_tuning: [0.0; 4],
+                    extra_params: [0.0; 4],
+                };
+                self.renderer.queue().write_buffer(
+                    &self.blit_screen_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&screen_uniforms),
+                );
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &self.preview_screen_bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            } else {
+                pass.set_pipeline(&self.composite_pipeline);
+                pass.set_bind_group(0, &self.composite_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
-        {
+        if self.options.show_egui {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("egui_pass"),
@@ -1009,14 +1389,11 @@ impl RendererState {
                 })
                 .forget_lifetime();
             self.egui_renderer
-                .render(&mut pass, &paint_jobs, &screen_descriptor);
+                .render(&mut pass, &self.cached_paint_jobs, &self.cached_screen_descriptor);
         }
 
         self.renderer.queue().submit(Some(encoder.finish()));
         output.present();
-        for id in &panel_response.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
 
         let composite_ms = composite_start.elapsed().as_secs_f32() * 1000.0;
         let frame_cpu_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1038,15 +1415,47 @@ impl RendererState {
         self.perf.terminal_height = overlay_h;
         self.perf.scale_factor = self.window.scale_factor() as f32;
         self.perf.preview_mix = preview_mix;
-        self.perf.egui_paint_jobs = paint_jobs.len() as u32;
+        self.perf.egui_paint_jobs = self.cached_paint_jobs.len() as u32;
         self.perf.egui_textures_delta =
-            (panel_response.textures_delta.set.len() + panel_response.textures_delta.free.len())
-                as u32;
+            (textures_delta_set_count + textures_delta_free_count) as u32;
         self.perf.last_previewing = previewing;
         self.perf.last_uses_billboard = uses_billboard;
         self.perf.offscreen_stats = self.renderer.offscreen_perf_stats();
+        if self.options.log_perf && now >= self.next_perf_log_secs {
+            self.log_perf_line();
+            self.next_perf_log_secs += 1.0;
+        }
 
         Ok(())
+    }
+
+    fn log_perf_line(&self) {
+        let offscreen = self.perf.offscreen_stats.unwrap_or_default();
+        eprintln!(
+            "PERF fps={:.1} frame_ms={:.2} interval_ms={:.2} acquire_ms={:.2} term_ms={:.2} screen_ms={:.2} scene_ms={:.2} egui_ms={:.2} comp_ms={:.2} surf={}x{} term={}x{} preview={} bill={} scene={}x{} out={}x{} passes={} draws={} downsample={}",
+            self.perf.smoothed_fps,
+            self.perf.smoothed_frame_cpu_ms,
+            self.perf.smoothed_frame_interval_ms,
+            self.perf.smoothed_surface_acquire_ms,
+            self.perf.smoothed_terminal_ms,
+            self.perf.smoothed_screen_ms,
+            self.perf.smoothed_scene_ms,
+            self.perf.smoothed_egui_ms,
+            self.perf.smoothed_composite_ms,
+            self.perf.surface_width,
+            self.perf.surface_height,
+            self.perf.terminal_width,
+            self.perf.terminal_height,
+            self.perf.last_previewing,
+            self.perf.last_uses_billboard,
+            offscreen.scene_width,
+            offscreen.scene_height,
+            offscreen.output_width,
+            offscreen.output_height,
+            offscreen.pass_count,
+            offscreen.draw_call_count,
+            offscreen.has_downsample,
+        );
     }
 
     fn draw_egui(
@@ -1055,118 +1464,36 @@ impl RendererState {
         render_config: &mut RenderConfig,
         perf: NativePerfSnapshot,
     ) {
-        egui::Window::new("Controls")
-            .default_open(true)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.heading("Transfer");
-                ui.add(egui::Slider::new(&mut transfer.linear_gain, 0.70..=1.40).text("Linear Gain"));
-                ui.add(egui::Slider::new(&mut transfer.gamma, 0.70..=1.30).text("Gamma"));
-                ui.add(egui::Slider::new(&mut transfer.lift, -0.08..=0.08).text("Lift"));
-                ui.add(egui::Slider::new(&mut transfer.saturation, 0.50..=1.80).text("Saturation"));
-
-                ui.separator();
-                ui.heading("Render");
-                ComboBox::from_label("Display Scaling")
-                    .selected_text(if render_config.display_pixelated {
-                        "Pixelated"
-                    } else {
-                        "Smooth"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut render_config.display_pixelated, false, "Smooth");
-                        ui.selectable_value(&mut render_config.display_pixelated, true, "Pixelated");
-                    });
-                ComboBox::from_label("Terminal Sampling")
-                    .selected_text(if render_config.overlay_filter {
-                        "Filtered"
-                    } else {
-                        "Nearest"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut render_config.overlay_filter, true, "Filtered");
-                        ui.selectable_value(&mut render_config.overlay_filter, false, "Nearest");
-                    });
-                ui.add(
-                    egui::Slider::new(&mut render_config.gallery_canvas_scale, 0.25..=1.50)
-                        .text("Gallery Canvas Res"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut render_config.preview_canvas_scale, 0.25..=1.50)
-                        .text("Preview Canvas Res"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut render_config.preview_max_dim, 96..=320)
-                        .step_by(4.0)
-                        .text("Preview Res"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut render_config.preview_render_scale, 1.0..=3.0)
-                        .step_by(0.25)
-                        .text("Preview SSAA"),
-                );
-
-                ui.separator();
-                ui.heading("Perf");
-                ui.monospace(format!(
-                    "{:>3} FPS\nFRAME {:>4.1} ms\nINTVL {:>4.1} ms\nACQ   {:>4.1} ms\nTERM  {:>4.1} ms\nSCREEN {:>4.1} ms {}\n3D    {:>4.1} ms\nEGUI  {:>4.1} ms\nCOMP  {:>4.1} ms",
-                    perf.smoothed_fps.round().clamp(0.0, 999.0) as u32,
-                    perf.smoothed_frame_cpu_ms,
-                    perf.smoothed_frame_interval_ms,
-                    perf.smoothed_surface_acquire_ms,
-                    perf.smoothed_terminal_ms,
-                    perf.smoothed_screen_ms,
-                    if perf.last_screen_redrew { "*" } else { "-" },
-                    perf.smoothed_scene_ms,
-                    perf.smoothed_egui_ms,
-                    perf.smoothed_composite_ms,
-                ));
-                ui.separator();
-                ui.monospace(format!(
-                    "WIN  {}x{} @ {:.2}\nSURF {}x{}\nTERM {}x{}\nMODE {} mix {:.2}\nBILL {}\nEGUI jobs {} tex {}",
-                    perf.window_width,
-                    perf.window_height,
-                    perf.scale_factor,
-                    perf.surface_width,
-                    perf.surface_height,
-                    perf.terminal_width,
-                    perf.terminal_height,
-                    if perf.last_previewing { "preview" } else { "gallery" },
-                    perf.preview_mix,
-                    if perf.last_uses_billboard { "on" } else { "off" },
-                    perf.egui_paint_jobs,
-                    perf.egui_textures_delta,
-                ));
-                if let Some(stats) = perf.offscreen_stats {
-                    ui.separator();
-                    ui.monospace(format!(
-                        "3D scene {}x{}\n3D out  {}x{}\n3D passes {}\n3D draws  {}\n3D downsample {}",
-                        stats.scene_width,
-                        stats.scene_height,
-                        stats.output_width,
-                        stats.output_height,
-                        stats.pass_count,
-                        stats.draw_call_count,
-                        if stats.has_downsample { "yes" } else { "no" },
-                    ));
-                }
-            });
-
-        egui::Area::new("fps_overlay".into())
-            .anchor(Align2::RIGHT_BOTTOM, [-12.0, -12.0])
-            .show(ctx, |ui| {
-                let fps_label = perf.smoothed_fps.round().clamp(0.0, 999.0) as u32;
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{fps_label:>3} FPS\nFRAME {:>4.1} MS\nSCREEN {}\n3D {:>4.1} MS\nCOMP {:>4.1} MS",
-                        perf.smoothed_frame_cpu_ms,
-                        if perf.last_screen_redrew { "*" } else { "-" },
-                        perf.smoothed_scene_ms,
-                        perf.smoothed_composite_ms,
-                    ))
-                    .monospace(),
-                );
-            });
+        egui_panel::show_controls_panel(
+            ctx,
+            transfer,
+            render_config,
+            egui_panel::PerfPanelData {
+                smoothed_fps: perf.smoothed_fps,
+                smoothed_frame_cpu_ms: perf.smoothed_frame_cpu_ms,
+                smoothed_frame_interval_ms: perf.smoothed_frame_interval_ms,
+                smoothed_surface_acquire_ms: perf.smoothed_surface_acquire_ms,
+                smoothed_terminal_ms: perf.smoothed_terminal_ms,
+                smoothed_screen_ms: perf.smoothed_screen_ms,
+                smoothed_scene_ms: perf.smoothed_scene_ms,
+                smoothed_egui_ms: perf.smoothed_egui_ms,
+                smoothed_composite_ms: perf.smoothed_composite_ms,
+                window_width: perf.window_width,
+                window_height: perf.window_height,
+                surface_width: perf.surface_width,
+                surface_height: perf.surface_height,
+                terminal_width: perf.terminal_width,
+                terminal_height: perf.terminal_height,
+                scale_factor: perf.scale_factor,
+                preview_mix: perf.preview_mix,
+                egui_paint_jobs: perf.egui_paint_jobs,
+                egui_textures_delta: perf.egui_textures_delta,
+                last_screen_redrew: perf.last_screen_redrew,
+                last_previewing: perf.last_previewing,
+                last_uses_billboard: perf.last_uses_billboard,
+                offscreen_stats: perf.offscreen_stats,
+            },
+        );
     }
 
     fn ensure_composite_bind_group(
@@ -1276,6 +1603,79 @@ impl RendererState {
                 });
         self.screen_overlay_filter = overlay_filter;
     }
+
+    fn ensure_preview_blit_bind_groups(
+        &mut self,
+        display_pixelated: bool,
+        billboard_generation: u64,
+    ) {
+        if self.preview_screen_display_pixelated != display_pixelated {
+            let screen_sampler = if display_pixelated {
+                &self.overlay_sampler_nearest
+            } else {
+                &self.overlay_sampler_linear
+            };
+            self.preview_screen_bind_group =
+                self.renderer
+                    .device()
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("preview_screen_bg"),
+                        layout: &self.blit_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&self.screen_texture_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(screen_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: self.blit_screen_uniform_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+            self.preview_screen_display_pixelated = display_pixelated;
+        }
+
+        if self.preview_billboard_display_pixelated != display_pixelated
+            || self.preview_billboard_generation != billboard_generation
+        {
+            let billboard_view = self
+                .renderer
+                .offscreen_view()
+                .unwrap_or(&self.placeholder_billboard_view);
+            let billboard_sampler = if display_pixelated {
+                &self.billboard_sampler_nearest
+            } else {
+                &self.billboard_sampler_linear
+            };
+            self.preview_billboard_bind_group =
+                self.renderer
+                    .device()
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("preview_billboard_bg"),
+                        layout: &self.blit_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(billboard_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(billboard_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: self.blit_billboard_uniform_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+            self.preview_billboard_display_pixelated = display_pixelated;
+            self.preview_billboard_generation = billboard_generation;
+        }
+    }
 }
 
 fn create_sampler(device: &wgpu::Device, filter: wgpu::FilterMode) -> wgpu::Sampler {
@@ -1346,6 +1746,19 @@ fn preferred_surface_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFor
     formats[0]
 }
 
+fn preferred_present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if modes.contains(&wgpu::PresentMode::Immediate) {
+        return wgpu::PresentMode::Immediate;
+    }
+    if modes.contains(&wgpu::PresentMode::Mailbox) {
+        return wgpu::PresentMode::Mailbox;
+    }
+    if modes.contains(&wgpu::PresentMode::AutoNoVsync) {
+        return wgpu::PresentMode::AutoNoVsync;
+    }
+    modes[0]
+}
+
 fn bgl_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -1408,7 +1821,7 @@ fn main() -> Result<()> {
     let mut builder = EventLoop::builder();
     configure_event_loop(&mut builder, BackendChoice::Auto);
     let event_loop = builder.build()?;
-    let mut app = NativeBillboardApp::new();
+    let mut app = NativeBillboardApp::new(RuntimeOptions::from_env());
     event_loop.run_app(&mut app)?;
     if let Some(err) = app.exit_error {
         return Err(err);

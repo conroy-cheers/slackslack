@@ -14,6 +14,8 @@ emoji-renderer = { path = "../emoji-renderer" }
 ratatui = { version = "0.30", default-features = false, features = ["underline-color"] }
 fontdue = "0.9"
 wgpu = "24"
+egui = "0.31"
+egui-wgpu = "0.31"
 bytemuck = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -26,6 +28,8 @@ web-sys = { version = "0.3", features = [
     "Performance",
     "console",
     "KeyboardEvent",
+    "MouseEvent",
+    "WheelEvent",
     "EventTarget",
 ] }
 anyhow = "1"
