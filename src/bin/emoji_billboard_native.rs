@@ -116,6 +116,7 @@ struct CompositeUniforms {
     terminal_grid: [f32; 4],
     transfer_tuning: [f32; 4],
     perf_toggles: [f32; 4],
+    channel_switch: [f32; 4],
 }
 
 #[repr(C)]
@@ -285,6 +286,8 @@ struct RendererState {
     last_time_secs: f64,
     last_blink_on: bool,
     last_preview_overlay_visible: bool,
+    preview_scene_time_origin_secs: f64,
+    last_preview_reset_nonce: u32,
     perf: NativePerfSnapshot,
     next_perf_log_secs: f64,
 }
@@ -882,6 +885,8 @@ impl RendererState {
             last_time_secs: 0.0,
             last_blink_on: true,
             last_preview_overlay_visible: false,
+            preview_scene_time_origin_secs: 0.0,
+            last_preview_reset_nonce: 0,
             perf: NativePerfSnapshot {
                 smoothed_fps: 60.0,
                 window_width: size.width.max(1),
@@ -1046,6 +1051,16 @@ impl RendererState {
 
         let previewing = self.gallery.is_previewing();
         let preview_mix = self.gallery.preview_mix();
+        let preview_reset_nonce = self.gallery.preview_reset_nonce();
+        if previewing && preview_reset_nonce != self.last_preview_reset_nonce {
+            self.preview_scene_time_origin_secs = now;
+            self.last_preview_reset_nonce = preview_reset_nonce;
+        }
+        let preview_scene_time_secs = if previewing {
+            (now - self.preview_scene_time_origin_secs).max(0.0)
+        } else {
+            now
+        };
         if self.last_screen_transfer != self.transfer
             || self.last_screen_perf_toggles != self.perf_toggles
             || self.last_screen_render_config.overlay_filter != self.render_config.overlay_filter
@@ -1082,7 +1097,7 @@ impl RendererState {
                 &texture,
                 render_w,
                 render_h,
-                now,
+                preview_scene_time_secs,
                 &params,
             )?;
 
@@ -1122,6 +1137,12 @@ impl RendererState {
                     } else {
                         0.0
                     },
+                    0.0,
+                ],
+                channel_switch: [
+                    self.gallery.channel_switch(),
+                    self.gallery.channel_switch_dir(),
+                    0.0,
                     0.0,
                 ],
             };
@@ -1249,6 +1270,12 @@ impl RendererState {
                 },
                 if self.perf_toggles.billboard { 1.0 } else { 0.0 },
             ],
+            channel_switch: [
+                self.gallery.channel_switch(),
+                self.gallery.channel_switch_dir(),
+                0.0,
+                0.0,
+            ],
         };
         self.renderer.queue().write_buffer(
             &self.composite_uniform_buffer,
@@ -1333,7 +1360,12 @@ impl RendererState {
                             self.transfer.lift,
                             self.transfer.saturation,
                         ],
-                        extra_params: [1.0, 0.0, 0.0, 0.0],
+                        extra_params: [
+                            1.0,
+                            self.gallery.channel_switch(),
+                            self.gallery.channel_switch_dir(),
+                            now as f32,
+                        ],
                     };
                     self.renderer.queue().write_buffer(
                         &self.blit_billboard_uniform_buffer,
@@ -1357,7 +1389,12 @@ impl RendererState {
                     dest_rect: terminal_rect,
                     uv_rect: overlay_uv_rect,
                     transfer_tuning: [0.0; 4],
-                    extra_params: [0.0; 4],
+                    extra_params: [
+                        0.0,
+                        self.gallery.channel_switch(),
+                        self.gallery.channel_switch_dir(),
+                        now as f32,
+                    ],
                 };
                 self.renderer.queue().write_buffer(
                     &self.blit_screen_uniform_buffer,

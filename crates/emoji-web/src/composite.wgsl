@@ -8,6 +8,7 @@ struct Uniforms {
     terminal_grid: vec4f,
     transfer_tuning: vec4f,
     perf_toggles: vec4f,
+    channel_switch: vec4f,
 }
 
 @group(0) @binding(0) var overlay_tex: texture_2d<f32>;
@@ -77,6 +78,11 @@ fn sample_billboard_scene(uv: vec2f) -> vec3f {
         clamp(uv, vec2f(0.0), vec2f(1.0)),
         0.0,
     ).rgb;
+}
+
+fn hash12(p: vec2f) -> f32 {
+    let h = dot(p, vec2f(127.1, 311.7));
+    return fract(sin(h) * 43758.5453123);
 }
 
 struct VsOut {
@@ -154,12 +160,19 @@ fn fs_screen(in: VsOut) -> @location(0) vec4f {
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4f {
     let frag_px = in.uv * u.output_size;
+    let channel = u.channel_switch.x;
+    let channel_dir = select(-1.0, 1.0, u.channel_switch.y >= 0.0);
     let bg_t = clamp(length((frag_px - u.output_size * 0.5) / u.output_size), 0.0, 1.0);
     let gallery_bg = mix(vec3f(0.01, 0.06, 0.03), vec3f(0.0, 0.0, 0.0), bg_t);
     let preview_bg = mix(vec3f(0.015, 0.015, 0.02), vec3f(0.0, 0.0, 0.0), bg_t);
     var color = mix(gallery_bg, preview_bg, u.preview_mix);
 
-    let local = frag_px - u.billboard_rect.xy;
+    let row_wobble =
+        (sin(in.uv.y * 180.0 + u.time_secs * 44.0) * 0.018 +
+         sin(in.uv.y * 37.0 - u.time_secs * 19.0) * 0.008 +
+         channel_dir * (in.uv.y - 0.5) * 0.03) * channel;
+
+    let local = vec2f(frag_px.x + row_wobble * u.billboard_rect.z, frag_px.y) - u.billboard_rect.xy;
     let bb_uv = vec2f(
         clamp(local.x / max(u.billboard_rect.z, 1.0), 0.0, 1.0),
         clamp(local.y / max(u.billboard_rect.w, 1.0), 0.0, 1.0),
@@ -172,7 +185,7 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
         color = mix(color, bb, u.preview_mix);
     }
 
-    let term_local = frag_px - u.terminal_rect.xy;
+    let term_local = vec2f(frag_px.x + row_wobble * u.terminal_rect.z, frag_px.y) - u.terminal_rect.xy;
     let term_local_uv = vec2f(
         clamp(term_local.x / max(u.terminal_rect.z, 1.0), 0.0, 1.0),
         clamp(term_local.y / max(u.terminal_rect.w, 1.0), 0.0, 1.0),
@@ -183,6 +196,17 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
     if in_term {
         let screen = textureSampleLevel(overlay_tex, overlay_sampler, term_uv, 0.0);
         color = mix(color, screen.rgb, screen.a);
+    }
+
+    if channel > 0.0 {
+        let noise_coord = floor(vec2f(in.uv.x * u.output_size.x * 0.65, in.uv.y * u.output_size.y * 0.35) + vec2f(u.time_secs * 120.0, u.time_secs * 53.0));
+        let noise = hash12(noise_coord);
+        let burst = smoothstep(0.25, 1.0, sin(in.uv.y * 96.0 - u.time_secs * 31.0) * 0.5 + 0.5);
+        let static_mix = channel * (0.30 + burst * 0.28);
+        let monochrome = vec3f(dot(color, vec3f(0.2126, 0.7152, 0.0722)));
+        color = mix(color, monochrome, channel * 0.45);
+        color = mix(color, vec3f(noise), static_mix * 0.55);
+        color *= 1.0 - channel * 0.08 + burst * channel * 0.22;
     }
 
     return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);

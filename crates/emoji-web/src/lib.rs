@@ -337,6 +337,8 @@ struct App {
     last_fps_label: u32,
     last_blink_on: bool,
     last_preview_overlay_visible: bool,
+    preview_scene_time_origin_secs: f64,
+    last_preview_reset_nonce: u32,
     smoothed_frame_cpu_ms: f32,
     smoothed_frame_interval_ms: f32,
     smoothed_surface_acquire_ms: f32,
@@ -363,6 +365,7 @@ struct CompositeUniforms {
     terminal_grid: [f32; 4],
     transfer_tuning: [f32; 4],
     perf_toggles: [f32; 4],
+    channel_switch: [f32; 4],
 }
 
 #[repr(C)]
@@ -885,6 +888,8 @@ impl App {
             last_fps_label: 60,
             last_blink_on: true,
             last_preview_overlay_visible: false,
+            preview_scene_time_origin_secs: 0.0,
+            last_preview_reset_nonce: 0,
             smoothed_frame_cpu_ms: 0.0,
             smoothed_frame_interval_ms: 0.0,
             smoothed_surface_acquire_ms: 0.0,
@@ -1088,6 +1093,16 @@ impl App {
 
         let previewing = self.gallery.is_previewing();
         let preview_mix = self.gallery.preview_mix();
+        let preview_reset_nonce = self.gallery.preview_reset_nonce();
+        if previewing && preview_reset_nonce != self.last_preview_reset_nonce {
+            self.preview_scene_time_origin_secs = time_secs;
+            self.last_preview_reset_nonce = preview_reset_nonce;
+        }
+        let preview_scene_time_secs = if previewing {
+            (time_secs - self.preview_scene_time_origin_secs).max(0.0)
+        } else {
+            time_secs
+        };
         let terminal_cols = TERM_COLS as f32;
         let terminal_rows = TERM_ROWS as f32;
         let transfer = TRANSFER_TUNING.with(|t| *t.borrow());
@@ -1130,7 +1145,7 @@ impl App {
                         &texture,
                         render_w,
                         render_h,
-                        time_secs,
+                        preview_scene_time_secs,
                         &params,
                     )?;
                 }
@@ -1173,7 +1188,7 @@ impl App {
                     transfer.lift,
                     transfer.saturation,
                 ],
-                extra_params: [1.0, 0.0, 0.0, 0.0],
+                extra_params: [1.0, 0.0, 0.0, time_secs as f32],
             };
             self.renderer.queue().write_buffer(
                 &self.billboard_blit_uniform_buffer,
@@ -1232,6 +1247,12 @@ impl App {
                     if perf_toggles.crt { 1.0 } else { 0.0 },
                     if perf_toggles.transfer { 1.0 } else { 0.0 },
                     if perf_toggles.overlay_filter && render_config.overlay_filter { 1.0 } else { 0.0 },
+                    0.0,
+                ],
+                channel_switch: [
+                    self.gallery.channel_switch(),
+                    self.gallery.channel_switch_dir(),
+                    0.0,
                     0.0,
                 ],
             };
@@ -1319,6 +1340,12 @@ impl App {
                 if perf_toggles.transfer { 1.0 } else { 0.0 },
                 if perf_toggles.overlay_filter && render_config.overlay_filter { 1.0 } else { 0.0 },
                 if perf_toggles.billboard { 1.0 } else { 0.0 },
+            ],
+            channel_switch: [
+                self.gallery.channel_switch(),
+                self.gallery.channel_switch_dir(),
+                0.0,
+                0.0,
             ],
         };
         self.renderer.queue().write_buffer(

@@ -5,6 +5,8 @@ const BRIGHT: [u8; 4] = [0, 255, 0, 255];
 const DIM: [u8; 4] = [0, 102, 0, 255];
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const GRAY: [u8; 4] = [160, 160, 160, 255];
+const YELLOW: [u8; 4] = [255, 212, 64, 255];
+const DIM_GRAY: [u8; 4] = [96, 96, 96, 255];
 const BG: [u8; 4] = [0, 0, 0, 255];
 const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
@@ -19,6 +21,9 @@ pub struct Gallery {
     preview_index: Option<usize>,
     preview_mix: f32,
     preview_target: f32,
+    channel_switch: f32,
+    channel_switch_dir: f32,
+    preview_reset_nonce: u32,
 }
 
 pub enum KeyAction {
@@ -43,6 +48,18 @@ impl Gallery {
         self.preview_index
     }
 
+    pub fn channel_switch(&self) -> f32 {
+        self.channel_switch
+    }
+
+    pub fn channel_switch_dir(&self) -> f32 {
+        self.channel_switch_dir
+    }
+
+    pub fn preview_reset_nonce(&self) -> u32 {
+        self.preview_reset_nonce
+    }
+
     pub fn tick(&mut self, dt_secs: f32) {
         let speed = 6.5;
         let delta = (dt_secs * speed).clamp(0.0, 1.0);
@@ -55,11 +72,18 @@ impl Gallery {
         if self.preview_target <= 0.0 && self.preview_mix <= 0.0 {
             self.preview_index = None;
         }
+
+        let switch_decay = (dt_secs * 8.5).clamp(0.0, 1.0);
+        if self.channel_switch > 0.0 {
+            self.channel_switch = (self.channel_switch - switch_decay).max(0.0);
+        }
     }
 
     pub fn handle_key(&mut self, action: KeyAction) {
         if self.is_previewing() {
             match action {
+                KeyAction::Up => self.move_preview_selection(-1),
+                KeyAction::Down => self.move_preview_selection(1),
                 KeyAction::Escape | KeyAction::Backspace => {
                     self.preview_target = 0.0;
                 }
@@ -76,6 +100,7 @@ impl Gallery {
                 if let Some(&(real_index, _)) = filtered.get(self.selected) {
                     self.preview_index = Some(real_index);
                     self.preview_target = 1.0;
+                    self.preview_reset_nonce = self.preview_reset_nonce.wrapping_add(1);
                 }
             }
             KeyAction::Char(c) => {
@@ -101,6 +126,7 @@ impl Gallery {
             self.preview_index = Some(real_index);
             self.preview_target = 1.0;
             self.preview_mix = 1.0;
+            self.preview_reset_nonce = self.preview_reset_nonce.wrapping_add(1);
         }
     }
 
@@ -155,6 +181,9 @@ impl Gallery {
             preview_index: None,
             preview_mix: 0.0,
             preview_target: 0.0,
+            channel_switch: 0.0,
+            channel_switch_dir: 0.0,
+            preview_reset_nonce: 0,
         }
     }
 
@@ -168,6 +197,28 @@ impl Gallery {
         let len = filtered.len() as isize;
         let next = ((current + delta) % len + len) % len;
         self.selected = next as usize;
+    }
+
+    fn move_preview_selection(&mut self, delta: isize) {
+        let filtered = self.filtered_entries();
+        if filtered.is_empty() {
+            return;
+        }
+        let current = self
+            .preview_index
+            .and_then(|preview_index| filtered.iter().position(|(real_index, _)| *real_index == preview_index))
+            .unwrap_or(self.selected.min(filtered.len().saturating_sub(1)));
+        let max_index = filtered.len().saturating_sub(1) as isize;
+        let next = (current as isize + delta).clamp(0, max_index) as usize;
+        if next == current {
+            return;
+        }
+        let next_real_index = filtered[next].0;
+        self.selected = next;
+        self.preview_index = Some(next_real_index);
+        self.channel_switch = 1.0;
+        self.channel_switch_dir = if delta < 0 { -1.0 } else { 1.0 };
+        self.preview_reset_nonce = self.preview_reset_nonce.wrapping_add(1);
     }
 
     pub fn billboard_cell_rect(&self, area_width: u16, area_height: u16) -> Option<CellRect> {
@@ -227,6 +278,22 @@ fn ascii_rule(width: u16) -> String {
 fn put_segments(grid: &mut TerminalGrid, mut x: u16, y: u16, segments: &[(&str, [u8; 4])]) {
     for (text, color) in segments {
         grid.put_text(x, y, text, *color, BG);
+        x = x.saturating_add(text.chars().count() as u16);
+        if x >= TERM_COLS {
+            break;
+        }
+    }
+}
+
+fn put_segments_bg(
+    grid: &mut TerminalGrid,
+    mut x: u16,
+    y: u16,
+    bg: [u8; 4],
+    segments: &[(&str, [u8; 4])],
+) {
+    for (text, color) in segments {
+        grid.put_text(x, y, text, *color, bg);
         x = x.saturating_add(text.chars().count() as u16);
         if x >= TERM_COLS {
             break;
@@ -325,13 +392,57 @@ fn draw_footer(grid: &mut TerminalGrid, gallery: &Gallery) {
 }
 
 fn draw_preview_overlay(grid: &mut TerminalGrid, gallery: &Gallery) {
-    let name = gallery
+    let filtered = gallery.filtered_entries();
+    let current_filtered_index = gallery
         .preview_index()
-        .and_then(|index| gallery.entries.get(index))
-        .map(|entry| entry.name.as_str())
+        .and_then(|preview_index| {
+            filtered
+                .iter()
+                .position(|(real_index, _)| *real_index == preview_index)
+        })
+        .unwrap_or(gallery.selected.min(filtered.len().saturating_sub(1)));
+    let count = filtered.len();
+    let current_name = filtered
+        .get(current_filtered_index)
+        .map(|(_, entry)| entry.name.as_str())
         .unwrap_or("?");
+    let prev_name = current_filtered_index
+        .checked_sub(1)
+        .and_then(|index| filtered.get(index))
+        .map(|(_, entry)| entry.name.as_str());
+    let next_name = filtered
+        .get(current_filtered_index + 1)
+        .map(|(_, entry)| entry.name.as_str());
 
-    grid.put_centered(1, &format!(":{name}:"), WHITE, TRANSPARENT);
+    let up_line = format!("UP  :{}:", prev_name.unwrap_or("----"));
+    let dn_line = format!("DN  :{}:", next_name.unwrap_or("----"));
+    let up_x = ((TERM_COLS as usize).saturating_sub(up_line.len())) / 2;
+    let dn_x = ((TERM_COLS as usize).saturating_sub(dn_line.len())) / 2;
+    put_segments_bg(
+        grid,
+        up_x as u16,
+        1,
+        TRANSPARENT,
+        &[
+            ("UP", if prev_name.is_some() { YELLOW } else { DIM_GRAY }),
+            ("  :", DIM_GRAY),
+            (prev_name.unwrap_or("----"), DIM_GRAY),
+            (":", DIM_GRAY),
+        ],
+    );
+    grid.put_centered(3, &format!(":{current_name}:"), WHITE, TRANSPARENT);
+    put_segments_bg(
+        grid,
+        dn_x as u16,
+        5,
+        TRANSPARENT,
+        &[
+            ("DN", if next_name.is_some() { YELLOW } else { DIM_GRAY }),
+            ("  :", DIM_GRAY),
+            (next_name.unwrap_or("----"), DIM_GRAY),
+            (":", DIM_GRAY),
+        ],
+    );
 
     let help = "PRESS ESC TO GO BACK";
     let start_x = ((TERM_COLS as usize).saturating_sub(help.len())) / 2;
