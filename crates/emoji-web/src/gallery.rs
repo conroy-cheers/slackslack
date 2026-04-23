@@ -36,6 +36,27 @@ pub enum KeyAction {
 }
 
 impl Gallery {
+    pub fn with_entries<I, S>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|name| EmojiEntry { name: name.into() })
+                .collect(),
+            selected: 0,
+            search: String::new(),
+            preview_index: None,
+            preview_mix: 0.0,
+            preview_target: 0.0,
+            channel_switch: 0.0,
+            channel_switch_dir: 0.0,
+            preview_reset_nonce: 0,
+        }
+    }
+
     pub fn is_previewing(&self) -> bool {
         self.preview_index.is_some()
     }
@@ -58,6 +79,66 @@ impl Gallery {
 
     pub fn preview_reset_nonce(&self) -> u32 {
         self.preview_reset_nonce
+    }
+
+    pub fn current_entry_name(&self) -> Option<&str> {
+        let filtered = self.filtered_entries();
+        if filtered.is_empty() {
+            return None;
+        }
+        let current_filtered_index = if self.preview_target > 0.0 {
+            self.preview_index()
+                .and_then(|preview_index| {
+                    filtered
+                        .iter()
+                        .position(|(real_index, _)| *real_index == preview_index)
+                })
+                .unwrap_or(self.selected.min(filtered.len().saturating_sub(1)))
+        } else {
+            self.selected.min(filtered.len().saturating_sub(1))
+        };
+        filtered
+            .get(current_filtered_index)
+            .map(|(_, entry)| entry.name.as_str())
+    }
+
+    pub fn set_entries<I, S>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let current_name = self.current_entry_name().map(str::to_owned);
+        self.entries = entries
+            .into_iter()
+            .map(|name| EmojiEntry { name: name.into() })
+            .collect();
+
+        let filtered = self.filtered_entries();
+        if filtered.is_empty() {
+            self.selected = 0;
+            self.preview_index = None;
+            self.preview_target = 0.0;
+            self.preview_mix = 0.0;
+            self.channel_switch = 0.0;
+            self.channel_switch_dir = 0.0;
+            return;
+        }
+
+        let next_index = current_name
+            .as_deref()
+            .and_then(|name| {
+                filtered
+                    .iter()
+                    .position(|(_, entry)| entry.name.as_str() == name)
+            })
+            .unwrap_or_else(|| self.selected.min(filtered.len().saturating_sub(1)));
+        let next_preview_index = if self.preview_index.is_some() {
+            filtered.get(next_index).map(|(real_index, _)| *real_index)
+        } else {
+            None
+        };
+        self.selected = next_index;
+        self.preview_index = next_preview_index;
     }
 
     pub fn tick(&mut self, dt_secs: f32) {
@@ -131,60 +212,47 @@ impl Gallery {
     }
 
     pub fn new() -> Self {
-        let entries: Vec<EmojiEntry> = [
-            "thumbsup",
-            "heart",
-            "fire",
-            "rocket",
-            "tada",
-            "eyes",
-            "wave",
-            "100",
-            "sparkles",
-            "pray",
-            "muscle",
-            "sunglasses",
-            "thinking_face",
-            "laughing",
-            "sob",
-            "clap",
-            "raised_hands",
-            "ok_hand",
-            "point_up",
-            "star",
-            "zap",
-            "rainbow",
-            "pizza",
-            "coffee",
-            "beer",
-            "skull",
-            "ghost",
-            "robot_face",
-            "alien",
-            "unicorn",
-            "penguin",
-            "cat",
-            "dog",
-            "parrot",
-            "crab",
-        ]
-        .iter()
-        .map(|name| EmojiEntry {
-            name: name.to_string(),
-        })
-        .collect();
-
-        Self {
-            entries,
-            selected: 0,
-            search: String::new(),
-            preview_index: None,
-            preview_mix: 0.0,
-            preview_target: 0.0,
-            channel_switch: 0.0,
-            channel_switch_dir: 0.0,
-            preview_reset_nonce: 0,
-        }
+        Self::with_entries(
+            [
+                "thumbsup",
+                "heart",
+                "fire",
+                "rocket",
+                "tada",
+                "eyes",
+                "wave",
+                "100",
+                "sparkles",
+                "pray",
+                "muscle",
+                "sunglasses",
+                "thinking_face",
+                "laughing",
+                "sob",
+                "clap",
+                "raised_hands",
+                "ok_hand",
+                "point_up",
+                "star",
+                "zap",
+                "rainbow",
+                "pizza",
+                "coffee",
+                "beer",
+                "skull",
+                "ghost",
+                "robot_face",
+                "alien",
+                "unicorn",
+                "penguin",
+                "cat",
+                "dog",
+                "parrot",
+                "crab",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -328,6 +396,13 @@ fn draw_emoji_list(grid: &mut TerminalGrid, gallery: &Gallery) {
 
     let list_top = 2u16;
     let list_height = TERM_ROWS.saturating_sub(4) as usize;
+    if count == 0 {
+        grid.put_centered(list_top + 1, "NO EMOJI LOADED", DIM_GRAY, BG);
+        grid.put_centered(list_top + 3, "SIGN IN WITH SLACK", DIM, BG);
+        let bottom_rule = ascii_rule(TERM_COLS);
+        grid.put_text(0, TERM_ROWS - 2, &bottom_rule, DIM, BG);
+        return;
+    }
     let max_scroll = count.saturating_sub(list_height);
     let scroll = gallery
         .selected
@@ -393,6 +468,9 @@ fn draw_footer(grid: &mut TerminalGrid, gallery: &Gallery) {
 
 fn draw_preview_overlay(grid: &mut TerminalGrid, gallery: &Gallery) {
     let filtered = gallery.filtered_entries();
+    if filtered.is_empty() {
+        return;
+    }
     let current_filtered_index = gallery
         .preview_index()
         .and_then(|preview_index| {
@@ -401,7 +479,6 @@ fn draw_preview_overlay(grid: &mut TerminalGrid, gallery: &Gallery) {
                 .position(|(real_index, _)| *real_index == preview_index)
         })
         .unwrap_or(gallery.selected.min(filtered.len().saturating_sub(1)));
-    let count = filtered.len();
     let current_name = filtered
         .get(current_filtered_index)
         .map(|(_, entry)| entry.name.as_str())
