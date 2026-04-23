@@ -9,6 +9,14 @@ const YELLOW: [u8; 4] = [255, 212, 64, 255];
 const DIM_GRAY: [u8; 4] = [96, 96, 96, 255];
 const BG: [u8; 4] = [0, 0, 0, 255];
 const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
+const MENU_DWELL_SECS: f32 = 0.6;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DisplayedMenu {
+    Auth,
+    Settings,
+    Main,
+}
 
 pub struct EmojiEntry {
     pub name: String,
@@ -23,12 +31,41 @@ pub struct Gallery {
     preview_target: f32,
     channel_switch: f32,
     channel_switch_dir: f32,
+    channel_switch_loading: bool,
     preview_reset_nonce: u32,
+    auth: HostedAuthState,
+    login_request_nonce: u32,
+    settings_open: bool,
+    sign_out_request_nonce: u32,
+    displayed_menu: DisplayedMenu,
+    displayed_menu_hold_secs: f32,
 }
 
+#[derive(Clone)]
+pub struct HostedAuthState {
+    pub status: String,
+    pub workspace: String,
+    pub hint: String,
+    pub signed_in: bool,
+    pub busy: bool,
+    pub auth_configured: bool,
+    pub auth_prompt: HostedAuthPrompt,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HostedAuthPrompt {
+    None,
+    OpenLogin,
+}
+
+#[derive(Clone, Copy)]
 pub enum KeyAction {
     Up,
     Down,
+    PageUp,
+    PageDown,
+    F2,
+    F8,
     Enter,
     Escape,
     Char(char),
@@ -53,7 +90,22 @@ impl Gallery {
             preview_target: 0.0,
             channel_switch: 0.0,
             channel_switch_dir: 0.0,
+            channel_switch_loading: false,
             preview_reset_nonce: 0,
+            auth: HostedAuthState {
+                status: "INITIALIZING".to_owned(),
+                workspace: String::new(),
+                hint: "Preparing hosted Slack session...".to_owned(),
+                signed_in: false,
+                busy: true,
+                auth_configured: false,
+                auth_prompt: HostedAuthPrompt::None,
+            },
+            login_request_nonce: 0,
+            settings_open: false,
+            sign_out_request_nonce: 0,
+            displayed_menu: DisplayedMenu::Auth,
+            displayed_menu_hold_secs: MENU_DWELL_SECS,
         }
     }
 
@@ -77,8 +129,56 @@ impl Gallery {
         self.channel_switch_dir
     }
 
+    pub fn set_channel_switch_loading(&mut self, loading: bool) {
+        self.channel_switch_loading = loading;
+        if !loading && self.channel_switch <= 0.0 {
+            self.channel_switch_dir = 0.0;
+        }
+    }
+
     pub fn preview_reset_nonce(&self) -> u32 {
         self.preview_reset_nonce
+    }
+
+    pub fn login_request_nonce(&self) -> u32 {
+        self.login_request_nonce
+    }
+
+    pub fn sign_out_request_nonce(&self) -> u32 {
+        self.sign_out_request_nonce
+    }
+
+    pub fn show_settings_screen(&self) -> bool {
+        self.displayed_menu == DisplayedMenu::Settings
+    }
+
+    pub fn set_hosted_auth_state(&mut self, auth: HostedAuthState) {
+        self.auth = auth;
+        if !self.auth.signed_in {
+            self.preview_index = None;
+            self.preview_target = 0.0;
+            self.preview_mix = 0.0;
+            self.channel_switch = 0.0;
+            self.channel_switch_dir = 0.0;
+            self.channel_switch_loading = false;
+            self.search.clear();
+            self.selected = 0;
+            self.settings_open = false;
+        }
+    }
+
+    pub fn show_auth_screen(&self) -> bool {
+        self.displayed_menu == DisplayedMenu::Auth
+    }
+
+    fn desired_menu(&self) -> DisplayedMenu {
+        if !self.auth.signed_in || (self.auth.busy && self.entries.is_empty()) {
+            DisplayedMenu::Auth
+        } else if self.settings_open {
+            DisplayedMenu::Settings
+        } else {
+            DisplayedMenu::Main
+        }
     }
 
     pub fn current_entry_name(&self) -> Option<&str> {
@@ -121,6 +221,7 @@ impl Gallery {
             self.preview_mix = 0.0;
             self.channel_switch = 0.0;
             self.channel_switch_dir = 0.0;
+            self.channel_switch_loading = false;
             return;
         }
 
@@ -155,12 +256,50 @@ impl Gallery {
         }
 
         let switch_decay = (dt_secs * 8.5).clamp(0.0, 1.0);
-        if self.channel_switch > 0.0 {
+        if self.channel_switch > 0.0 && !self.channel_switch_loading {
             self.channel_switch = (self.channel_switch - switch_decay).max(0.0);
+            if self.channel_switch <= 0.0 {
+                self.channel_switch_dir = 0.0;
+            }
+        }
+
+        self.displayed_menu_hold_secs = (self.displayed_menu_hold_secs - dt_secs).max(0.0);
+        let desired_menu = self.desired_menu();
+        if desired_menu != self.displayed_menu && self.displayed_menu_hold_secs <= 0.0 {
+            self.displayed_menu = desired_menu;
+            self.displayed_menu_hold_secs = MENU_DWELL_SECS;
         }
     }
 
     pub fn handle_key(&mut self, action: KeyAction) {
+        if self.show_auth_screen() {
+            if matches!(action, KeyAction::Enter)
+                && matches!(self.auth.auth_prompt, HostedAuthPrompt::OpenLogin)
+            {
+                self.login_request_nonce = self.login_request_nonce.wrapping_add(1);
+            }
+            return;
+        }
+
+        if matches!(action, KeyAction::F2) && !self.is_previewing() {
+            self.settings_open = !self.settings_open;
+            return;
+        }
+
+        if self.settings_open {
+            match action {
+                KeyAction::Enter => {
+                    self.sign_out_request_nonce = self.sign_out_request_nonce.wrapping_add(1);
+                    self.settings_open = false;
+                }
+                KeyAction::Escape => {
+                    self.settings_open = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.is_previewing() {
             match action {
                 KeyAction::Up => self.move_preview_selection(-1),
@@ -176,6 +315,9 @@ impl Gallery {
         match action {
             KeyAction::Up => self.move_selection(-1),
             KeyAction::Down => self.move_selection(1),
+            KeyAction::PageUp => self.page_selection(-1),
+            KeyAction::PageDown => self.page_selection(1),
+            KeyAction::F2 | KeyAction::F8 => {}
             KeyAction::Enter => {
                 let filtered = self.filtered_entries();
                 if let Some(&(real_index, _)) = filtered.get(self.selected) {
@@ -267,6 +409,18 @@ impl Gallery {
         self.selected = next as usize;
     }
 
+    fn page_selection(&mut self, delta_pages: isize) {
+        let filtered = self.filtered_entries();
+        if filtered.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let page = TERM_ROWS.saturating_sub(4).max(1) as isize;
+        let max_index = filtered.len().saturating_sub(1) as isize;
+        let next = (self.selected as isize + delta_pages * page).clamp(0, max_index);
+        self.selected = next as usize;
+    }
+
     fn move_preview_selection(&mut self, delta: isize) {
         let filtered = self.filtered_entries();
         if filtered.is_empty() {
@@ -286,6 +440,7 @@ impl Gallery {
         self.preview_index = Some(next_real_index);
         self.channel_switch = 1.0;
         self.channel_switch_dir = if delta < 0 { -1.0 } else { 1.0 };
+        self.channel_switch_loading = true;
         self.preview_reset_nonce = self.preview_reset_nonce.wrapping_add(1);
     }
 
@@ -322,7 +477,13 @@ pub struct CellRect {
 }
 
 pub fn render_to_grid(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
-    if show_preview_overlay(gallery) {
+    if gallery.show_auth_screen() {
+        grid.clear(BG);
+        draw_auth_screen(grid, gallery, time_secs);
+    } else if gallery.show_settings_screen() {
+        grid.clear(BG);
+        draw_settings_screen(grid, gallery, time_secs);
+    } else if show_preview_overlay(gallery) {
         grid.clear(TRANSPARENT);
         draw_preview_overlay(grid, gallery);
     } else {
@@ -370,19 +531,125 @@ fn put_segments_bg(
 }
 
 fn draw_gallery(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
-    draw_header(grid, time_secs);
+    draw_header(grid, gallery, time_secs);
     draw_emoji_list(grid, gallery);
     draw_footer(grid, gallery);
 }
 
-fn draw_header(grid: &mut TerminalGrid, time_secs: f64) {
+fn wrap_lines(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let words: Vec<&str> = paragraph.split_whitespace().collect();
+        if words.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        for word in words {
+            let next_len = if current.is_empty() {
+                word.len()
+            } else {
+                current.len() + 1 + word.len()
+            };
+            if next_len > width && !current.is_empty() {
+                lines.push(current);
+                current = word.to_owned();
+            } else {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    lines
+}
+
+fn draw_auth_screen(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
+    let cursor = if cursor_blink_on(time_secs) { "_" } else { " " };
+    grid.put_centered(4, "ULTRAMOJI VIEWER 4D", BRIGHT, BG);
+    grid.put_centered(6, &format!("HOSTED TERMINAL MODE{cursor}"), GREEN, BG);
+
+    if !gallery.auth.workspace.is_empty() {
+        grid.put_centered(9, &gallery.auth.workspace, YELLOW, BG);
+    }
+
+    grid.put_centered(
+        11,
+        &gallery.auth.status,
+        if gallery.auth.busy { YELLOW } else { WHITE },
+        BG,
+    );
+
+    let hint_lines = wrap_lines(&gallery.auth.hint, (TERM_COLS as usize).saturating_sub(8));
+    for (idx, line) in hint_lines.into_iter().take(5).enumerate() {
+        grid.put_centered(13 + idx as u16, &line, DIM_GRAY, BG);
+    }
+
+    let action_line = if matches!(gallery.auth.auth_prompt, HostedAuthPrompt::OpenLogin) {
+        "PRESS ENTER TO OPEN SLACK LOGIN"
+    } else if gallery.auth.busy {
+        "WAITING FOR SLACK"
+    } else if gallery.auth.signed_in {
+        &gallery.auth.status
+    } else if gallery.auth.auth_configured {
+        "SLACK LOGIN IS UNAVAILABLE"
+    } else {
+        "SLACK LOGIN IS NOT CONFIGURED"
+    };
+    grid.put_centered(TERM_ROWS - 4, action_line, BRIGHT, BG);
+
+    let footer = if matches!(gallery.auth.auth_prompt, HostedAuthPrompt::OpenLogin) {
+        &[("ENTER", YELLOW), (" OPEN LOGIN IN NEW TAB", DIM)][..]
+    } else {
+        &[("STATUS", YELLOW), (" ", DIM), (&gallery.auth.status, DIM_GRAY)][..]
+    };
+    put_segments(grid, 0, TERM_ROWS - 1, footer);
+}
+
+fn draw_settings_screen(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
+    let cursor = if cursor_blink_on(time_secs) { "_" } else { " " };
+    grid.put_centered(5, "SETTINGS", BRIGHT, BG);
+    grid.put_centered(7, &format!("TERMINAL MENU{cursor}"), GREEN, BG);
+
+    if !gallery.auth.workspace.is_empty() {
+        grid.put_centered(10, &gallery.auth.workspace, YELLOW, BG);
+    }
+
+    grid.put_centered(14, "> SIGN OUT OF SLACK", WHITE, BG);
+    grid.put_centered(17, "PRESS ENTER TO CONFIRM", BRIGHT, BG);
+    grid.put_centered(19, "PRESS ESC TO GO BACK", DIM_GRAY, BG);
+
+    put_segments(
+        grid,
+        0,
+        TERM_ROWS - 1,
+        &[
+            ("ENTER", BRIGHT),
+            (" SIGN OUT  ", DIM),
+            ("ESC", BRIGHT),
+            (" BACK", DIM),
+        ],
+    );
+}
+
+fn draw_header(grid: &mut TerminalGrid, gallery: &Gallery, time_secs: f64) {
     let cursor = if cursor_blink_on(time_secs) { "_" } else { " " };
     put_segments(
         grid,
         0,
         0,
-        &[(" EMOJI BILLBOARD", BRIGHT), (cursor, GREEN)],
+        &[(" ULTRAMOJI VIEWER 4D", BRIGHT), (cursor, GREEN)],
     );
+    if gallery.auth.signed_in {
+        let hint = "F2 SETTINGS";
+        let x = TERM_COLS.saturating_sub(hint.len() as u16);
+        grid.put_text(x, 0, hint, DIM_GRAY, BG);
+    }
 }
 
 fn draw_emoji_list(grid: &mut TerminalGrid, gallery: &Gallery) {
@@ -457,10 +724,10 @@ fn draw_footer(grid: &mut TerminalGrid, gallery: &Gallery) {
             &[
                 (" UP/DN", BRIGHT),
                 (" MOVE  ", DIM),
+                ("PGUP/DN", BRIGHT),
+                (" PAGE  ", DIM),
                 ("ENTER", BRIGHT),
-                (" VIEW  ", DIM),
-                ("TYPE", BRIGHT),
-                (" SEARCH", DIM),
+                (" VIEW", DIM),
             ],
         );
     }

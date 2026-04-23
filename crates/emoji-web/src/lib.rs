@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
+use emoji_renderer::decode::decode_emoji_frames;
 use emoji_renderer::gpu::{emoji_preview_scene_params, GpuRenderer};
 use emoji_renderer::texture::{COLOR_SOURCE_ALPHA_THRESHOLD, fill_transparent_rgb_from_nearest};
 use js_sys::{Object, Reflect};
@@ -47,6 +48,19 @@ struct RenderConfig {
     overlay_filter: bool,
 }
 
+struct DecodedPreviewAsset {
+    name: String,
+    frames: Vec<Vec<[u8; 4]>>,
+    delays_ms: Vec<u32>,
+    width: u32,
+    height: u32,
+}
+
+enum PendingPreviewAsset {
+    Clear,
+    Replace(DecodedPreviewAsset),
+}
+
 impl Default for PerfToggles {
     fn default() -> Self {
         Self {
@@ -86,6 +100,13 @@ thread_local! {
     static TRANSFER_TUNING: RefCell<TransferTuning> = RefCell::new(TransferTuning::default());
     static PERF_TOGGLES: RefCell<PerfToggles> = RefCell::new(PerfToggles::default());
     static RENDER_CONFIG: RefCell<RenderConfig> = RefCell::new(RenderConfig::default());
+    static PENDING_GALLERY_ENTRIES: RefCell<Option<Vec<String>>> = RefCell::new(None);
+    static PENDING_PREVIEW_ASSET: RefCell<Option<PendingPreviewAsset>> = RefCell::new(None);
+    static CURRENT_EMOJI_NAME: RefCell<String> = RefCell::new(String::new());
+    static PENDING_HOSTED_AUTH_STATE: RefCell<Option<gallery::HostedAuthState>> = RefCell::new(None);
+    static LOGIN_REQUEST_NONCE: RefCell<u32> = const { RefCell::new(0) };
+    static PENDING_SETTINGS_TOGGLE: RefCell<bool> = const { RefCell::new(false) };
+    static SIGN_OUT_REQUEST_NONCE: RefCell<u32> = const { RefCell::new(0) };
 }
 
 #[wasm_bindgen]
@@ -138,10 +159,100 @@ pub fn set_render_config(
     });
 }
 
+#[wasm_bindgen]
+pub fn set_gallery_entries(entries_text: String) {
+    let entries = entries_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    PENDING_GALLERY_ENTRIES.with(|pending| {
+        *pending.borrow_mut() = Some(entries);
+    });
+}
+
+#[wasm_bindgen]
+pub fn clear_active_emoji_texture() {
+    PENDING_PREVIEW_ASSET.with(|pending| {
+        *pending.borrow_mut() = Some(PendingPreviewAsset::Clear);
+    });
+}
+
+#[wasm_bindgen]
+pub fn set_active_emoji_texture_bytes(name: String, bytes: Vec<u8>) -> bool {
+    let Some((frames, delays_ms, width, height)) = decode_emoji_frames(&bytes) else {
+        return false;
+    };
+    PENDING_PREVIEW_ASSET.with(|pending| {
+        *pending.borrow_mut() = Some(PendingPreviewAsset::Replace(DecodedPreviewAsset {
+            name,
+            frames,
+            delays_ms,
+            width,
+            height,
+        }));
+    });
+    true
+}
+
+#[wasm_bindgen]
+pub fn current_emoji_name() -> String {
+    CURRENT_EMOJI_NAME.with(|name| name.borrow().clone())
+}
+
+#[wasm_bindgen]
+pub fn set_hosted_auth_state(
+    status: String,
+    workspace: String,
+    hint: String,
+    signed_in: bool,
+    busy: bool,
+    auth_configured: bool,
+) {
+    let auth_prompt = if !signed_in && !busy && auth_configured {
+        gallery::HostedAuthPrompt::OpenLogin
+    } else {
+        gallery::HostedAuthPrompt::None
+    };
+    PENDING_HOSTED_AUTH_STATE.with(|pending| {
+        *pending.borrow_mut() = Some(gallery::HostedAuthState {
+            status,
+            workspace,
+            hint,
+            signed_in,
+            busy,
+            auth_configured,
+            auth_prompt,
+        });
+    });
+}
+
+#[wasm_bindgen]
+pub fn login_request_nonce() -> u32 {
+    LOGIN_REQUEST_NONCE.with(|nonce| *nonce.borrow())
+}
+
+#[wasm_bindgen]
+pub fn toggle_settings_menu() {
+    PENDING_SETTINGS_TOGGLE.with(|pending| {
+        *pending.borrow_mut() = true;
+    });
+}
+
+#[wasm_bindgen]
+pub fn sign_out_request_nonce() -> u32 {
+    SIGN_OUT_REQUEST_NONCE.with(|nonce| *nonce.borrow())
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     wasm_bindgen_futures::spawn_local(run());
+}
+
+fn debug_log(message: &str) {
+    web_sys::console::log_1(&format!("[ultramoji-viewer-4d-rs] {message}").into());
 }
 
 async fn run() {
@@ -163,6 +274,10 @@ async fn run() {
                 let action = match event.key().as_str() {
                     "ArrowUp" => Some(gallery::KeyAction::Up),
                     "ArrowDown" => Some(gallery::KeyAction::Down),
+                    "PageUp" => Some(gallery::KeyAction::PageUp),
+                    "PageDown" => Some(gallery::KeyAction::PageDown),
+                    "F2" => Some(gallery::KeyAction::F2),
+                    "F8" => Some(gallery::KeyAction::F8),
                     "Enter" => Some(gallery::KeyAction::Enter),
                     "Escape" => Some(gallery::KeyAction::Escape),
                     "Backspace" => Some(gallery::KeyAction::Backspace),
@@ -178,7 +293,9 @@ async fn run() {
                 };
                 if let Some(action) = action {
                     event.prevent_default();
-                    app.borrow_mut().handle_key(action);
+                    if let Ok(mut app) = app.try_borrow_mut() {
+                        app.handle_key(action);
+                    }
                 }
             },
         ));
@@ -192,7 +309,9 @@ async fn run() {
         let app_ref = app.clone();
         let canvas = app.borrow().canvas.clone();
         let mousemove = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
-            app_ref.borrow_mut().handle_mouse_move(event);
+            if let Ok(mut app) = app_ref.try_borrow_mut() {
+                app.handle_mouse_move(event);
+            }
         }));
         canvas
             .add_event_listener_with_callback("mousemove", mousemove.as_ref().unchecked_ref())
@@ -204,7 +323,9 @@ async fn run() {
         let app_ref = app.clone();
         let canvas = app.borrow().canvas.clone();
         let mouseleave = Closure::<dyn FnMut(web_sys::Event)>::wrap(Box::new(move |_| {
-            app_ref.borrow_mut().handle_mouse_leave();
+            if let Ok(mut app) = app_ref.try_borrow_mut() {
+                app.handle_mouse_leave();
+            }
         }));
         canvas
             .add_event_listener_with_callback("mouseleave", mouseleave.as_ref().unchecked_ref())
@@ -217,7 +338,9 @@ async fn run() {
         let canvas = app.borrow().canvas.clone();
         let mousedown = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
             event.prevent_default();
-            app_ref.borrow_mut().handle_mouse_down(event);
+            if let Ok(mut app) = app_ref.try_borrow_mut() {
+                app.handle_mouse_down(event);
+            }
         }));
         canvas
             .add_event_listener_with_callback("mousedown", mousedown.as_ref().unchecked_ref())
@@ -228,7 +351,9 @@ async fn run() {
     {
         let app = app.clone();
         let mouseup = Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |event: MouseEvent| {
-            app.borrow_mut().handle_mouse_up(event);
+            if let Ok(mut app) = app.try_borrow_mut() {
+                app.handle_mouse_up(event);
+            }
         }));
         window
             .add_event_listener_with_callback("mouseup", mouseup.as_ref().unchecked_ref())
@@ -241,7 +366,9 @@ async fn run() {
         let canvas = app.borrow().canvas.clone();
         let wheel = Closure::<dyn FnMut(WheelEvent)>::wrap(Box::new(move |event: WheelEvent| {
             event.prevent_default();
-            app_ref.borrow_mut().handle_wheel(event);
+            if let Ok(mut app) = app_ref.try_borrow_mut() {
+                app.handle_wheel(event);
+            }
         }));
         canvas
             .add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())
@@ -315,9 +442,15 @@ struct App {
     overlay_sampler_linear: wgpu::Sampler,
     overlay_sampler_nearest: wgpu::Sampler,
     start_time: f64,
-    demo_pixels: Vec<[u8; 4]>,
-    demo_w: u32,
-    demo_h: u32,
+    placeholder_pixels: Vec<[u8; 4]>,
+    placeholder_w: u32,
+    placeholder_h: u32,
+    preview_asset_name: Option<String>,
+    preview_asset_revision: u64,
+    preview_frames: Vec<Vec<[u8; 4]>>,
+    preview_frame_delays_ms: Vec<u32>,
+    preview_w: u32,
+    preview_h: u32,
     gallery: gallery::Gallery,
     terminal_renderer: TerminalRenderer,
     terminal_grid: TerminalGrid,
@@ -351,6 +484,8 @@ struct App {
     egui_textures_delta: u32,
     frame_counter: u32,
     last_effective_dpr: f64,
+    settings_visible: bool,
+    sign_out_request_nonce: u32,
 }
 
 #[repr(C)]
@@ -381,6 +516,139 @@ struct BlitUniforms {
 }
 
 impl App {
+    fn apply_pending_runtime_updates(&mut self) {
+        let mut gallery_updated = false;
+        PENDING_HOSTED_AUTH_STATE.with(|pending| {
+            if let Some(auth) = pending.borrow_mut().take() {
+                self.gallery.set_hosted_auth_state(auth);
+                gallery_updated = true;
+            }
+        });
+        PENDING_GALLERY_ENTRIES.with(|pending| {
+            if let Some(entries) = pending.borrow_mut().take() {
+                self.gallery.set_entries(entries);
+                gallery_updated = true;
+            }
+        });
+        if gallery_updated {
+            self.terminal_dirty = true;
+            self.screen_dirty = true;
+        }
+        PENDING_SETTINGS_TOGGLE.with(|pending| {
+            if *pending.borrow() {
+                *pending.borrow_mut() = false;
+            }
+        });
+
+        let current_name = self.gallery.current_entry_name().map(str::to_owned);
+        let previous_name = CURRENT_EMOJI_NAME.with(|name| name.borrow().clone());
+        if previous_name != current_name.clone().unwrap_or_default() {
+            debug_log(&format!(
+                "current_emoji_name changed: prev={previous_name:?} next={:?} previewing={} preview_mix={:.2}",
+                current_name,
+                self.gallery.is_previewing(),
+                self.gallery.preview_mix()
+            ));
+        }
+        if self.preview_asset_name.as_deref() != current_name.as_deref() {
+            if self.preview_asset_name.is_some() {
+                debug_log(&format!(
+                    "clearing preview asset due to name mismatch: asset={:?} current={:?}",
+                    self.preview_asset_name,
+                    current_name
+                ));
+            }
+            self.preview_asset_name = None;
+            self.preview_asset_revision = self.preview_asset_revision.wrapping_add(1);
+            self.preview_frames.clear();
+            self.preview_frame_delays_ms.clear();
+            self.preview_w = 0;
+            self.preview_h = 0;
+        }
+        PENDING_PREVIEW_ASSET.with(|pending| {
+            if let Some(update) = pending.borrow_mut().take() {
+                match update {
+                    PendingPreviewAsset::Clear => {
+                        debug_log("received PendingPreviewAsset::Clear");
+                        self.preview_asset_name = None;
+                        self.preview_asset_revision = self.preview_asset_revision.wrapping_add(1);
+                        self.preview_frames.clear();
+                        self.preview_frame_delays_ms.clear();
+                        self.preview_w = 0;
+                        self.preview_h = 0;
+                    }
+                    PendingPreviewAsset::Replace(asset) => {
+                        if current_name.as_deref() == Some(asset.name.as_str()) {
+                            debug_log(&format!(
+                                "accepting preview asset: name={} frames={} size={}x{}",
+                                asset.name,
+                                asset.frames.len(),
+                                asset.width,
+                                asset.height
+                            ));
+                            self.preview_asset_name = Some(asset.name);
+                            self.preview_asset_revision = self.preview_asset_revision.wrapping_add(1);
+                            self.preview_frames = asset.frames;
+                            self.preview_frame_delays_ms = asset.delays_ms;
+                            self.preview_w = asset.width;
+                            self.preview_h = asset.height;
+                        } else {
+                            debug_log(&format!(
+                                "discarding preview asset due to selection mismatch: asset={} current={:?}",
+                                asset.name,
+                                current_name
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+        let preview_loading = self.gallery.is_previewing()
+            && (self.preview_asset_name.as_deref() != current_name.as_deref()
+                || self.preview_frames.is_empty()
+                || self.preview_w == 0
+                || self.preview_h == 0);
+        self.gallery.set_channel_switch_loading(preview_loading);
+        CURRENT_EMOJI_NAME.with(|name| {
+            *name.borrow_mut() = current_name.unwrap_or_default();
+        });
+        LOGIN_REQUEST_NONCE.with(|nonce| {
+            *nonce.borrow_mut() = self.gallery.login_request_nonce();
+        });
+        SIGN_OUT_REQUEST_NONCE.with(|nonce| {
+            *nonce.borrow_mut() = self.gallery.sign_out_request_nonce();
+        });
+    }
+
+    fn current_preview_frame_index(&self, scene_time_secs: f64) -> Option<usize> {
+        if self.preview_frames.is_empty() || self.preview_w == 0 || self.preview_h == 0 {
+            return None;
+        }
+        if self.preview_frames.len() == 1 {
+            return Some(0);
+        }
+
+        let durations: Vec<u64> = self
+            .preview_frame_delays_ms
+            .iter()
+            .copied()
+            .map(|delay| delay.max(16) as u64)
+            .collect();
+        let total_duration_ms: u64 = durations.iter().sum();
+        if total_duration_ms == 0 {
+            return Some(0);
+        }
+
+        let mut elapsed_ms = ((scene_time_secs * 1000.0).max(0.0)) as u64 % total_duration_ms;
+        for (index, duration_ms) in durations.iter().enumerate() {
+            if elapsed_ms < *duration_ms {
+                return Some(index);
+            }
+            elapsed_ms = elapsed_ms.saturating_sub(*duration_ms);
+        }
+        Some(self.preview_frames.len().saturating_sub(1))
+    }
+
     async fn init() -> anyhow::Result<Self> {
         let window = web_sys::window().unwrap();
         let document = window.document().unwrap();
@@ -826,8 +1094,8 @@ impl App {
                         },
                     ],
                 });
-        let (demo_pixels, demo_w, demo_h) = demo_texture();
-        let gallery = gallery::Gallery::new();
+        let (placeholder_pixels, placeholder_w, placeholder_h) = demo_texture();
+        let gallery = gallery::Gallery::with_entries(Vec::<String>::new());
         let start_time = web_sys::window().unwrap().performance().unwrap().now();
 
         Ok(Self {
@@ -866,9 +1134,15 @@ impl App {
             overlay_sampler_linear,
             overlay_sampler_nearest,
             start_time,
-            demo_pixels,
-            demo_w,
-            demo_h,
+            placeholder_pixels,
+            placeholder_w,
+            placeholder_h,
+            preview_asset_name: None,
+            preview_asset_revision: 0,
+            preview_frames: Vec::new(),
+            preview_frame_delays_ms: Vec::new(),
+            preview_w: 0,
+            preview_h: 0,
             gallery,
             terminal_renderer,
             terminal_grid,
@@ -902,11 +1176,49 @@ impl App {
             egui_textures_delta: 0,
             frame_counter: 0,
             last_effective_dpr: dpr,
+            settings_visible: false,
+            sign_out_request_nonce: 0,
         })
     }
 
     fn handle_key(&mut self, action: gallery::KeyAction) {
+        let action_name = match &action {
+            gallery::KeyAction::Up => "Up",
+            gallery::KeyAction::Down => "Down",
+            gallery::KeyAction::PageUp => "PageUp",
+            gallery::KeyAction::PageDown => "PageDown",
+            gallery::KeyAction::F2 => "F2",
+            gallery::KeyAction::F8 => "F8",
+            gallery::KeyAction::Enter => "Enter",
+            gallery::KeyAction::Escape => "Escape",
+            gallery::KeyAction::Char(_) => "Char",
+            gallery::KeyAction::Backspace => "Backspace",
+        };
+        if matches!(action, gallery::KeyAction::F8) {
+            self.settings_visible = !self.settings_visible;
+            self.egui_pointer_pressed = false;
+            self.egui_pointer_released = false;
+            self.egui_pointer_down = false;
+            self.egui_scroll_delta = egui::Vec2::ZERO;
+            self.terminal_dirty = true;
+            self.screen_dirty = true;
+            return;
+        }
         self.gallery.handle_key(action);
+        if matches!(
+            action,
+            gallery::KeyAction::Enter
+                | gallery::KeyAction::Escape
+                | gallery::KeyAction::PageUp
+                | gallery::KeyAction::PageDown
+        ) {
+            debug_log(&format!(
+                "handle_key {action_name}: current={:?} previewing={} preview_mix={:.2}",
+                self.gallery.current_entry_name(),
+                self.gallery.is_previewing(),
+                self.gallery.preview_mix()
+            ));
+        }
         self.terminal_dirty = true;
         self.screen_dirty = true;
     }
@@ -944,6 +1256,7 @@ impl App {
         let time_secs = elapsed_ms / 1000.0;
         let dt_secs = (time_secs - self.last_time_secs).max(0.0);
         self.last_time_secs = time_secs;
+        self.apply_pending_runtime_updates();
         self.gallery.tick(dt_secs as f32);
 
         if dt_secs > 0.0 {
@@ -963,31 +1276,33 @@ impl App {
         let mut transfer = TRANSFER_TUNING.with(|t| *t.borrow());
         let mut render_config = RENDER_CONFIG.with(|cfg| *cfg.borrow());
         let mut egui_events = Vec::new();
-        if let Some(pos) = self.egui_pointer_pos {
-            egui_events.push(egui::Event::PointerMoved(pos));
-        }
-        if self.egui_pointer_pressed {
-            egui_events.push(egui::Event::PointerButton {
-                pos: self.egui_pointer_pos.unwrap_or(egui::Pos2::ZERO),
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            });
-        }
-        if self.egui_pointer_released {
-            egui_events.push(egui::Event::PointerButton {
-                pos: self.egui_pointer_pos.unwrap_or(egui::Pos2::ZERO),
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            });
-        }
-        if self.egui_scroll_delta != egui::Vec2::ZERO {
-            egui_events.push(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: self.egui_scroll_delta,
-                modifiers: egui::Modifiers::NONE,
-            });
+        if self.settings_visible {
+            if let Some(pos) = self.egui_pointer_pos {
+                egui_events.push(egui::Event::PointerMoved(pos));
+            }
+            if self.egui_pointer_pressed {
+                egui_events.push(egui::Event::PointerButton {
+                    pos: self.egui_pointer_pos.unwrap_or(egui::Pos2::ZERO),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            if self.egui_pointer_released {
+                egui_events.push(egui::Event::PointerButton {
+                    pos: self.egui_pointer_pos.unwrap_or(egui::Pos2::ZERO),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            if self.egui_scroll_delta != egui::Vec2::ZERO {
+                egui_events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: self.egui_scroll_delta,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
         }
         let egui_raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -1025,9 +1340,16 @@ impl App {
             last_uses_billboard: self.gallery.is_previewing() && self.gallery.preview_mix() > 0.0,
             offscreen_stats: self.renderer.offscreen_perf_stats(),
         };
+        let mut panel_actions = egui_panel::PanelActions::default();
         let panel_response = self.egui_ctx.run(egui_raw_input, |ctx| {
-            egui_panel::show_controls_panel(ctx, &mut transfer, &mut render_config, full_perf);
+            if self.settings_visible {
+                panel_actions =
+                    egui_panel::show_controls_panel(ctx, &mut transfer, &mut render_config, full_perf);
+            }
         });
+        if panel_actions.sign_out_requested {
+            self.sign_out_request_nonce = self.sign_out_request_nonce.wrapping_add(1);
+        }
         self.smoothed_egui_ms =
             self.smoothed_egui_ms * 0.85 + ((perf.now() - egui_start) as f32) * 0.15;
         let textures_delta_set_count = panel_response.textures_delta.set.len();
@@ -1129,11 +1451,6 @@ impl App {
                     let render_w = (native_w * scale).round().max(1.0) as u32;
                     let render_h = (native_h * scale).round().max(1.0) as u32;
 
-                    let texture = emoji_renderer::texture::Texture {
-                        pixels: &self.demo_pixels,
-                        width: self.demo_w,
-                        height: self.demo_h,
-                    };
                     let mut params = emoji_preview_scene_params();
                     params.sharpen = Some(0.1);
                     params.dither = Some(0.3);
@@ -1141,13 +1458,19 @@ impl App {
                     params.jitter = Some(0.1);
                     params.supersample = true;
                     params.render_scale = Some(render_config.preview_render_scale);
-                    self.renderer.render_to_offscreen_params(
-                        &texture,
-                        render_w,
-                        render_h,
-                        preview_scene_time_secs,
-                        &params,
-                    )?;
+                    if let Some(index) = self.current_preview_frame_index(preview_scene_time_secs) {
+                        self.renderer.render_animated_frame_to_offscreen_params(
+                            self.preview_asset_revision,
+                            &self.preview_frames,
+                            index,
+                            self.preview_w,
+                            self.preview_h,
+                            render_w,
+                            render_h,
+                            preview_scene_time_secs,
+                            &params,
+                        )?;
+                    }
                 }
 
                 let cell_px_w = overlay_w as f32 / TERM_COLS as f32;
@@ -1370,19 +1693,22 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let composite_start = perf.now();
+        let has_egui_paint = !paint_jobs.is_empty();
         let mut encoder =
             self.renderer
                 .device()
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("composite_encoder"),
                 });
-        self.egui_renderer.update_buffers(
-            self.renderer.device(),
-            self.renderer.queue(),
-            &mut encoder,
-            &paint_jobs,
-            &screen_descriptor,
-        );
+        if has_egui_paint {
+            self.egui_renderer.update_buffers(
+                self.renderer.device(),
+                self.renderer.queue(),
+                &mut encoder,
+                &paint_jobs,
+                &screen_descriptor,
+            );
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite_pass"),
@@ -1400,7 +1726,7 @@ impl App {
             pass.set_bind_group(0, &self.composite_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        {
+        if has_egui_paint {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("egui_pass"),

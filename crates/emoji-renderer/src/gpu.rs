@@ -281,7 +281,7 @@ pub struct GpuRenderer {
     show_stencil_shadow: bool,
     linear_depth_format: wgpu::TextureFormat,
     cached_frames: Vec<FrameGpuState>,
-    cached_frames_key: Option<usize>,
+    cached_frames_key: Option<u64>,
     active_frame_idx: Option<usize>,
     last_offscreen_stats: Option<OffscreenPerfStats>,
     render_target_generation: u64,
@@ -865,8 +865,8 @@ impl GpuRenderer {
         })
     }
 
-    pub fn load_frames(&mut self, frames: &[Vec<[u8; 4]>], width: u32, height: u32) {
-        let key = frames.as_ptr() as usize;
+    pub fn load_frames(&mut self, cache_key: u64, frames: &[Vec<[u8; 4]>], width: u32, height: u32) {
+        let key = cache_key;
         if self.cached_frames_key == Some(key) && self.cached_frames.len() == frames.len() {
             return;
         }
@@ -972,6 +972,32 @@ impl GpuRenderer {
             });
         }
         self.cached_frames_key = Some(key);
+    }
+
+    pub fn render_animated_frame_to_offscreen_params(
+        &mut self,
+        cache_key: u64,
+        frames: &[Vec<[u8; 4]>],
+        frame_idx: usize,
+        tex_w: u32,
+        tex_h: u32,
+        px_w: u32,
+        px_h: u32,
+        time_secs: f64,
+        params: &SceneParams,
+    ) -> anyhow::Result<()> {
+        self.load_frames(cache_key, frames, tex_w, tex_h);
+        if frame_idx >= self.cached_frames.len() || px_w == 0 || px_h == 0 || tex_w == 0 || tex_h == 0 {
+            return Ok(());
+        }
+
+        self.active_frame_idx = Some(frame_idx);
+        self.ensure_render_target(px_w, px_h, params.supersample);
+
+        let tex_aspect = tex_w as f32 / tex_h as f32;
+        let result = self.render_scene(tex_aspect, px_w, px_h, time_secs, params);
+        self.active_frame_idx = None;
+        result
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1304,22 +1330,24 @@ impl GpuRenderer {
                     (&self.vertex_buffer, &self.index_buffer, self.num_indices, &self.tex_state.as_ref().unwrap().bind_group)
                 };
 
-            pass.set_vertex_buffer(0, vb.slice(..));
-            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+            if n_idx > 0 {
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
 
-            if self.show_stencil_shadow {
-                pass.set_pipeline(&self.shadow_pipeline);
-                pass.draw_indexed(0..n_idx, 0, 0..1);
-            }
-
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(1, tex_bg, &[]);
-            pass.draw_indexed(0..n_idx, 0, 0..1);
-
-            if self.show_wireframe {
-                if let Some(line_pipeline) = &self.line_pipeline {
-                    pass.set_pipeline(line_pipeline);
+                if self.show_stencil_shadow {
+                    pass.set_pipeline(&self.shadow_pipeline);
                     pass.draw_indexed(0..n_idx, 0, 0..1);
+                }
+
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(1, tex_bg, &[]);
+                pass.draw_indexed(0..n_idx, 0, 0..1);
+
+                if self.show_wireframe {
+                    if let Some(line_pipeline) = &self.line_pipeline {
+                        pass.set_pipeline(line_pipeline);
+                        pass.draw_indexed(0..n_idx, 0, 0..1);
+                    }
                 }
             }
         }

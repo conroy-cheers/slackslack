@@ -119,35 +119,6 @@ fn fs_screen(in: VsOut) -> @location(0) vec4f {
     }
 
     var color = overlay.rgb;
-    if u.perf_toggles.x > 0.5 {
-        let switch_phase = 1.0 - abs(u.preview_mix * 2.0 - 1.0);
-        let switching = f32(u.preview_mix > 0.001 && u.preview_mix < 0.999);
-        let crt_strength = 1.0 - u.preview_mix;
-        let aperture = mix(1.10, 0.015, switch_phase * switch_phase);
-        let band_dist = abs(term_uv.y - 0.5);
-        let visible = 1.0 - smoothstep(aperture, aperture + 0.015, band_dist);
-        let glow = exp(-band_dist * 140.0) * switch_phase;
-        let switched = color * visible + vec3f(1.0, 0.98, 0.90) * glow * 0.35;
-        color = mix(color, switched, switching);
-
-        let overlay_dims = vec2f(textureDimensions(overlay_tex));
-        let source_cell_h = max(overlay_dims.y / max(u.terminal_grid.y, 1.0), 1.0);
-        let source_row_pos = (term_uv.y * overlay_dims.y) / source_cell_h;
-        let row_phase = fract(source_row_pos);
-        let row_center_dist = abs(row_phase - 0.5);
-        let row_core = 1.0 - smoothstep(0.10, 0.46, row_center_dist);
-        let scan = 1.0 - crt_strength * (0.34 - row_core * 0.34);
-        let beam = 1.0 - crt_strength * 0.06 + crt_strength * 0.06 * sin((floor(source_row_pos) + 0.5) * 0.9 + u.time_secs * 0.9);
-        let phosphor_gain = 1.0 + row_core * 0.16 * crt_strength;
-        let flicker = 1.0 - crt_strength * 0.02 + crt_strength * 0.02 * sin(u.time_secs * 37.0 + term_uv.y * 11.0);
-        let edge =
-            smoothstep(0.0, 0.08, term_uv.x) *
-            smoothstep(0.0, 0.08, term_uv.y) *
-            smoothstep(0.0, 0.08, 1.0 - term_uv.x) *
-            smoothstep(0.0, 0.08, 1.0 - term_uv.y);
-        color *= scan * beam * flicker * phosphor_gain;
-        color = mix(color * (1.0 - 0.12 * crt_strength), color, edge);
-    }
 
     color = clamp(color, vec3f(0.0), vec3f(1.0));
     if u.perf_toggles.y > 0.5 {
@@ -162,10 +133,12 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
     let frag_px = in.uv * u.output_size;
     let channel = u.channel_switch.x;
     let channel_dir = select(-1.0, 1.0, u.channel_switch.y >= 0.0);
+    let use_preview_source = u.preview_mix >= 0.5;
     let bg_t = clamp(length((frag_px - u.output_size * 0.5) / u.output_size), 0.0, 1.0);
-    let gallery_bg = mix(vec3f(0.01, 0.06, 0.03), vec3f(0.0, 0.0, 0.0), bg_t);
+    let gallery_bg = vec3f(0.0, 0.0, 0.0);
     let preview_bg = mix(vec3f(0.015, 0.015, 0.02), vec3f(0.0, 0.0, 0.0), bg_t);
-    var color = mix(gallery_bg, preview_bg, u.preview_mix);
+    var gallery_color = gallery_bg;
+    var preview_color = preview_bg;
 
     let row_wobble =
         (sin(in.uv.y * 180.0 + u.time_secs * 44.0) * 0.018 +
@@ -180,9 +153,9 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
     let inside = u.billboard_rect.z > 0.0 && u.billboard_rect.w > 0.0
         && local.x >= 0.0 && local.y >= 0.0
         && local.x < u.billboard_rect.z && local.y < u.billboard_rect.w;
-    if inside && u.preview_mix > 0.0 {
+    if inside {
         let bb = sample_billboard_scene(bb_uv);
-        color = mix(color, bb, u.preview_mix);
+        preview_color = bb;
     }
 
     let term_local = vec2f(frag_px.x + row_wobble * u.terminal_rect.z, frag_px.y) - u.terminal_rect.xy;
@@ -195,7 +168,77 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
         && term_local.x < u.terminal_rect.z && term_local.y < u.terminal_rect.w;
     if in_term {
         let screen = textureSampleLevel(overlay_tex, overlay_sampler, term_uv, 0.0);
-        color = mix(color, screen.rgb, screen.a);
+        gallery_color = mix(gallery_color, screen.rgb, screen.a);
+        preview_color = mix(preview_color, screen.rgb, screen.a);
+    }
+
+    var color = select(gallery_color, preview_color, use_preview_source);
+
+    if u.perf_toggles.x > 0.5 {
+        let switch_phase = pow(1.0 - abs(u.preview_mix * 2.0 - 1.0), 1.35);
+        let switching = f32(u.preview_mix > 0.001 && u.preview_mix < 0.999);
+        let base_crt_strength = select(1.0, 0.0, use_preview_source);
+        let crt_strength = max(base_crt_strength, switch_phase);
+        let collapse = pow(switch_phase, 1.10);
+        let collapse_narrow = pow(collapse, 3.10);
+        let collapse_wobble =
+            sin(u.time_secs * 31.0 + in.uv.y * 46.0) * 0.0045 * collapse +
+            sin(u.time_secs * 19.0 - in.uv.y * 83.0) * 0.0025 * collapse;
+        let band_dist = abs((in.uv.y - 0.5) + collapse_wobble);
+        let aperture = mix(1.12, 0.007, collapse_narrow);
+        let edge_softness = mix(0.042, 0.010, collapse_narrow);
+        let visible = 1.0 - smoothstep(aperture, aperture + edge_softness, band_dist);
+        let center_hold = 1.0 - smoothstep(0.0, 0.16, band_dist);
+        let h_center_dist = abs(in.uv.x - 0.5);
+        let horiz_glow = 0.56 + 0.44 * exp(-h_center_dist * 4.2);
+        let horiz_core = 0.30 + 0.70 * exp(-h_center_dist * 9.5);
+        let line_glow =
+            exp(-band_dist * mix(16.0, 250.0, collapse_narrow)) *
+            mix(0.14, 1.10, collapse) *
+            (0.85 + center_hold * 0.25) *
+            horiz_glow;
+        let line_core =
+            exp(-band_dist * mix(26.0, 760.0, collapse_narrow)) *
+            (0.35 + collapse * 0.95) *
+            (0.85 + center_hold * 0.45) *
+            horiz_core;
+        let retrace =
+            smoothstep(0.68, 1.0, sin(in.uv.y * 170.0 - u.time_secs * 42.0) * 0.5 + 0.5) *
+            collapse * 0.10;
+        let edge_vignette =
+            smoothstep(0.0, 0.10, in.uv.x) *
+            smoothstep(0.0, 0.10, in.uv.y) *
+            smoothstep(0.0, 0.10, 1.0 - in.uv.x) *
+            smoothstep(0.0, 0.10, 1.0 - in.uv.y);
+        let switched =
+            color * visible * (0.90 + edge_vignette * 0.10) * (1.0 - retrace) +
+            vec3f(1.0, 0.97, 0.84) * (line_glow * 0.28 + line_core * 0.55);
+        color = mix(color, switched, switching);
+
+        let source_row_pos = in.uv.y * max(u.output_size.y * 0.5, 1.0);
+        let row_phase = fract(source_row_pos);
+        let row_center_dist = abs(row_phase - 0.5);
+        let row_core = 1.0 - smoothstep(0.10, 0.46, row_center_dist);
+        let scan = 1.0 - crt_strength * (0.34 - row_core * 0.34);
+        let beam = 1.0 - crt_strength * 0.06
+            + crt_strength * 0.06 * sin((floor(source_row_pos) + 0.5) * 0.9 + u.time_secs * 0.9);
+        let phosphor_gain = 1.0 + row_core * 0.16 * crt_strength;
+        let flicker = 1.0 - crt_strength * 0.02 + crt_strength * 0.02 * sin(u.time_secs * 37.0 + in.uv.y * 11.0);
+        let triad_phase = fract((frag_px.x + frag_px.y * 0.25) / 3.0);
+        let triad_mask =
+            select(
+                vec3f(1.03, 0.985, 0.985),
+                select(vec3f(0.985, 1.03, 0.985), vec3f(0.985, 0.985, 1.03), triad_phase > 0.666),
+                triad_phase > 0.333,
+            );
+        let edge =
+            smoothstep(0.0, 0.08, in.uv.x) *
+            smoothstep(0.0, 0.08, in.uv.y) *
+            smoothstep(0.0, 0.08, 1.0 - in.uv.x) *
+            smoothstep(0.0, 0.08, 1.0 - in.uv.y);
+        color *= scan * beam * flicker * phosphor_gain;
+        color *= mix(vec3f(1.0), triad_mask, crt_strength * 0.06);
+        color = mix(color * (1.0 - 0.12 * crt_strength), color, edge);
     }
 
     if channel > 0.0 {
