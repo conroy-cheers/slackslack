@@ -41,6 +41,29 @@ pub struct ConversationsListData {
     pub response_metadata: Option<ResponseMetadata>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ConversationsInfoData {
+    pub channel: Option<Channel>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ConversationsMembersData {
+    #[serde(default)]
+    pub members: Vec<UserId>,
+    pub response_metadata: Option<ResponseMetadata>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ConversationsOpenData {
+    pub channel: Option<Channel>,
+    #[serde(default)]
+    pub already_open: bool,
+    #[serde(default)]
+    pub no_op: bool,
+}
+
+pub type UsersConversationsData = ConversationsListData;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: ChannelId,
@@ -113,8 +136,12 @@ pub struct SlackFile {
     pub id: String,
     #[serde(default)]
     pub name: String,
+    pub title: Option<String>,
     pub mimetype: Option<String>,
     pub filetype: Option<String>,
+    pub pretty_type: Option<String>,
+    pub user: Option<UserId>,
+    pub url_private_download: Option<String>,
     pub url_private: Option<String>,
     pub thumb_360: Option<String>,
     pub thumb_480: Option<String>,
@@ -123,6 +150,11 @@ pub struct SlackFile {
     pub thumb_360_w: u32,
     #[serde(default)]
     pub thumb_360_h: u32,
+    pub size: Option<u64>,
+    pub created: Option<u64>,
+    pub timestamp: Option<u64>,
+    #[serde(default)]
+    pub channels: Vec<ChannelId>,
 }
 
 impl SlackFile {
@@ -172,6 +204,11 @@ pub struct UserInfoData {
     pub user: Option<User>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct UserProfileGetData {
+    pub profile: Option<UserProfile>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
@@ -202,6 +239,43 @@ pub struct UserProfile {
     pub display_name: Option<String>,
     pub real_name: Option<String>,
     pub image_48: Option<String>,
+    pub image_72: Option<String>,
+    pub title: Option<String>,
+    pub status_text: Option<String>,
+    pub status_emoji: Option<String>,
+    pub status_expiration: Option<u64>,
+    pub fields: Option<std::collections::HashMap<String, ProfileField>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileField {
+    pub value: Option<String>,
+    pub alt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct TeamProfileGetData {
+    pub profile: Option<TeamProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamProfile {
+    #[serde(default)]
+    pub fields: Vec<TeamProfileField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamProfileField {
+    #[serde(default)]
+    pub id: String,
+    pub section_id: Option<String>,
+    pub ordering: Option<i32>,
+    pub label: Option<String>,
+    pub hint: Option<String>,
+    pub field_name: Option<String>,
+    pub possible_values: Option<String>,
+    #[serde(default)]
+    pub options: std::collections::HashMap<String, serde_json::Value>,
 }
 
 // === rtm.connect ===
@@ -271,6 +345,20 @@ pub struct FilesCompleteUploadData {
     pub files: Vec<SlackFile>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct FilesInfoData {
+    pub file: Option<SlackFile>,
+    pub response_metadata: Option<ResponseMetadata>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct FilesListData {
+    #[serde(default)]
+    pub files: Vec<SlackFile>,
+    pub paging: Option<SearchPaging>,
+    pub response_metadata: Option<ResponseMetadata>,
+}
+
 // === emoji.list ===
 
 #[derive(Debug, Deserialize, Default)]
@@ -285,6 +373,23 @@ pub struct EmojiListData {
 pub struct ChannelSectionsListData {
     #[serde(default)]
     pub channel_sections: Vec<ChannelSection>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PinsListData {
+    #[serde(default)]
+    pub items: Vec<PinItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PinItem {
+    #[serde(default)]
+    pub r#type: String,
+    pub channel: Option<ChannelId>,
+    pub message: Option<Message>,
+    pub file: Option<SlackFile>,
+    pub created: Option<u64>,
+    pub created_by: Option<UserId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +509,21 @@ pub struct WsPresenceChange {
 pub struct SearchMessagesData {
     #[serde(default)]
     pub messages: SearchMessages,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SearchFilesData {
+    #[serde(default)]
+    pub files: SearchFiles,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SearchFiles {
+    #[serde(default)]
+    pub matches: Vec<SlackFile>,
+    pub paging: Option<SearchPaging>,
+    pub total: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]

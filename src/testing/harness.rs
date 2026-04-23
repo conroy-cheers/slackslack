@@ -1,5 +1,5 @@
-use crate::event::handler::{HandleResult, handle_event};
 use crate::event::Event;
+use crate::event::handler::{HandleResult, handle_event};
 use crate::slack::types::{Channel, Message, User, UserProfile};
 use crate::state::{AppState, Focus, InputMode};
 use crate::testing::mock_client::{ApiCall, MockSlackClient};
@@ -75,6 +75,12 @@ impl TestHarness {
                     display_name: Some(display_name.into()),
                     real_name: Some(display_name.into()),
                     image_48: None,
+                    image_72: None,
+                    title: None,
+                    status_text: None,
+                    status_emoji: None,
+                    status_expiration: None,
+                    fields: None,
                 }),
                 is_bot: false,
                 deleted: false,
@@ -90,7 +96,10 @@ impl TestHarness {
     }
 
     pub fn add_messages(&mut self, channel_id: &str, messages: Vec<Message>) -> &mut Self {
-        let cd = self.state.channel_data.entry(channel_id.into())
+        let cd = self
+            .state
+            .channel_data
+            .entry(channel_id.into())
             .or_insert_with(crate::state::ChannelData::new);
         cd.messages = messages.into();
         self
@@ -202,7 +211,9 @@ impl TestHarness {
     }
 
     pub fn active_channel_name(&self) -> Option<String> {
-        self.state.active_channel().map(|c| c.display_name().to_string())
+        self.state
+            .active_channel()
+            .map(|c| c.display_name().to_string())
     }
 
     pub fn selected_channel_idx(&self) -> usize {

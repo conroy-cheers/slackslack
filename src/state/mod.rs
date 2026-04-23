@@ -75,7 +75,12 @@ impl ChannelData {
         }
     }
 
-    fn add_reaction_to_iter<'a>(iter: impl Iterator<Item = &'a mut Message>, ts: &str, reaction: &str, user: &str) {
+    fn add_reaction_to_iter<'a>(
+        iter: impl Iterator<Item = &'a mut Message>,
+        ts: &str,
+        reaction: &str,
+        user: &str,
+    ) {
         for msg in iter {
             if msg.ts == ts {
                 if let Some(r) = msg.reactions.iter_mut().find(|r| r.name == reaction) {
@@ -95,7 +100,12 @@ impl ChannelData {
         }
     }
 
-    fn remove_reaction_from_iter<'a>(iter: impl Iterator<Item = &'a mut Message>, ts: &str, reaction: &str, user: &str) {
+    fn remove_reaction_from_iter<'a>(
+        iter: impl Iterator<Item = &'a mut Message>,
+        ts: &str,
+        reaction: &str,
+        user: &str,
+    ) {
         for msg in iter {
             if msg.ts == ts {
                 if let Some(r) = msg.reactions.iter_mut().find(|r| r.name == reaction) {
@@ -209,7 +219,7 @@ pub struct AppState {
 
     // Custom emoji
     pub standard_emoji: HashMap<String, String>, // shortcode -> unicode (from iamcal/emoji-data)
-    pub custom_emoji: HashMap<String, String>, // name -> resolved URL or "alias:other"
+    pub custom_emoji: HashMap<String, String>,   // name -> resolved URL or "alias:other"
     pub custom_emoji_images: HashMap<String, CachedImage>,
     pub pending_emoji_images: HashSet<String>,
     pub emoji_load_queue: Vec<String>,
@@ -278,7 +288,6 @@ pub struct AppState {
     pub focus: Focus,
     pub dirty: bool,
     pub last_error: Option<String>,
-
 }
 
 /// Cached image data ready for kitty protocol display.
@@ -291,8 +300,8 @@ pub struct CachedImage {
 /// Records where an image should be rendered after terminal.draw().
 pub struct ImagePlacement {
     pub url: String,
-    pub line: usize,       // virtual line number within the message list
-    pub col: u16,          // column offset from inner_x (0-indexed)
+    pub line: usize, // virtual line number within the message list
+    pub col: u16,    // column offset from inner_x (0-indexed)
     pub display_cols: u16,
     pub display_rows: u16,
 }
@@ -325,9 +334,9 @@ pub struct ThreadRenderInfo {
 
 #[derive(Clone, Debug)]
 pub enum ChannelListEntry {
-    Channel(usize),           // index into state.channels
-    SectionHeader(String),    // section_id
-    DmMore,                   // "N more..." indicator
+    Channel(usize),        // index into state.channels
+    SectionHeader(String), // section_id
+    DmMore,                // "N more..." indicator
     Spacer,
 }
 
@@ -341,7 +350,7 @@ pub enum InputMode {
     EmojiPicker,
     UserPicker,
     GlobalSearch,
-    FilePath,      // file path input for upload
+    FilePath, // file path input for upload
     EmojiPreview,
 }
 
@@ -534,12 +543,17 @@ impl AppState {
     }
 
     pub fn channel_data_mut(&mut self, channel_id: &str) -> &mut ChannelData {
-        self.channel_data.entry(channel_id.to_string()).or_insert_with(ChannelData::new)
+        self.channel_data
+            .entry(channel_id.to_string())
+            .or_insert_with(ChannelData::new)
     }
 
     /// Record activity for a channel (updates both legacy map for sorting and ChannelData).
     pub fn touch_channel_activity(&mut self, channel_id: &str, ts: &str) {
-        let entry = self.channel_activity.entry(channel_id.to_string()).or_default();
+        let entry = self
+            .channel_activity
+            .entry(channel_id.to_string())
+            .or_default();
         if ts > entry.as_str() {
             *entry = ts.to_string();
         }
@@ -570,12 +584,7 @@ impl AppState {
             .collect()
     }
 
-    pub fn set_history(
-        &mut self,
-        channel_id: String,
-        mut messages: Vec<Message>,
-        has_more: bool,
-    ) {
+    pub fn set_history(&mut self, channel_id: String, mut messages: Vec<Message>, has_more: bool) {
         if let Some(newest) = messages.first() {
             self.touch_channel_activity(&channel_id, &newest.ts);
         }
@@ -640,12 +649,20 @@ impl AppState {
         if self.channel_list_items.is_empty() {
             if !self.channels.is_empty() {
                 let len = self.channels.len();
-                self.selected_channel_idx = if self.selected_channel_idx == 0 { len - 1 } else { self.selected_channel_idx - 1 };
+                self.selected_channel_idx = if self.selected_channel_idx == 0 {
+                    len - 1
+                } else {
+                    self.selected_channel_idx - 1
+                };
             }
             return;
         }
         let len = self.channel_list_items.len();
-        let mut prev = if self.selected_visual_idx == 0 { len - 1 } else { self.selected_visual_idx - 1 };
+        let mut prev = if self.selected_visual_idx == 0 {
+            len - 1
+        } else {
+            self.selected_visual_idx - 1
+        };
         let start = prev;
         loop {
             if !matches!(self.channel_list_items[prev], ChannelListEntry::Spacer) {
@@ -704,7 +721,9 @@ impl AppState {
     }
 
     pub fn sync_selected_channel_from_visual(&mut self) {
-        if let Some(ChannelListEntry::Channel(idx)) = self.channel_list_items.get(self.selected_visual_idx) {
+        if let Some(ChannelListEntry::Channel(idx)) =
+            self.channel_list_items.get(self.selected_visual_idx)
+        {
             self.selected_channel_idx = *idx;
         }
     }
@@ -736,12 +755,20 @@ impl AppState {
         if self.channel_list_items.is_empty() {
             if !self.channels.is_empty() {
                 let len = self.channels.len();
-                self.selected_channel_idx = if self.selected_channel_idx == 0 { len - 1 } else { self.selected_channel_idx - 1 };
+                self.selected_channel_idx = if self.selected_channel_idx == 0 {
+                    len - 1
+                } else {
+                    self.selected_channel_idx - 1
+                };
             }
             return;
         }
         let len = self.channel_list_items.len();
-        let mut prev = if self.selected_visual_idx == 0 { len - 1 } else { self.selected_visual_idx - 1 };
+        let mut prev = if self.selected_visual_idx == 0 {
+            len - 1
+        } else {
+            self.selected_visual_idx - 1
+        };
         let start = prev;
         loop {
             if matches!(self.channel_list_items[prev], ChannelListEntry::Channel(_)) {
@@ -860,7 +887,10 @@ impl AppState {
         if msgs.is_empty() {
             return None;
         }
-        let idx = msgs.len().saturating_sub(1).saturating_sub(self.selected_message_idx);
+        let idx = msgs
+            .len()
+            .saturating_sub(1)
+            .saturating_sub(self.selected_message_idx);
         msgs.get(idx)
     }
 
@@ -921,26 +951,14 @@ impl AppState {
         channel.display_name().to_string()
     }
 
-    pub fn add_reaction(
-        &mut self,
-        channel_id: &str,
-        ts: &str,
-        reaction: &str,
-        user: &str,
-    ) {
+    pub fn add_reaction(&mut self, channel_id: &str, ts: &str, reaction: &str, user: &str) {
         if let Some(cd) = self.channel_data.get_mut(channel_id) {
             cd.add_reaction(ts, reaction, user);
             self.dirty = true;
         }
     }
 
-    pub fn remove_reaction(
-        &mut self,
-        channel_id: &str,
-        ts: &str,
-        reaction: &str,
-        user: &str,
-    ) {
+    pub fn remove_reaction(&mut self, channel_id: &str, ts: &str, reaction: &str, user: &str) {
         if let Some(cd) = self.channel_data.get_mut(channel_id) {
             cd.remove_reaction(ts, reaction, user);
             self.dirty = true;
@@ -1024,7 +1042,11 @@ impl AppState {
             } else {
                 self.channel_drafts.insert(
                     channel_id,
-                    (self.input_text.clone(), self.input_cursor, self.reply_to_thread),
+                    (
+                        self.input_text.clone(),
+                        self.input_cursor,
+                        self.reply_to_thread,
+                    ),
                 );
             }
         }
@@ -1136,8 +1158,14 @@ impl AppState {
         self.focus = Focus::Messages;
     }
 
-    pub fn set_thread_messages(&mut self, channel_id: &str, parent_ts: &str, messages: Vec<Message>) {
-        self.channel_data_mut(channel_id).set_thread_replies(parent_ts, messages);
+    pub fn set_thread_messages(
+        &mut self,
+        channel_id: &str,
+        parent_ts: &str,
+        messages: Vec<Message>,
+    ) {
+        self.channel_data_mut(channel_id)
+            .set_thread_replies(parent_ts, messages);
         self.thread_scroll_offset = 0;
         self.dirty = true;
     }
@@ -1256,7 +1284,11 @@ impl AppState {
     }
 
     /// Open the emoji picker from the given source with optional message reaction context.
-    pub fn open_emoji_picker(&mut self, source: EmojiPickerSource, message_reactions: Vec<(String, bool)>) {
+    pub fn open_emoji_picker(
+        &mut self,
+        source: EmojiPickerSource,
+        message_reactions: Vec<(String, bool)>,
+    ) {
         self.input_mode = InputMode::EmojiPicker;
         self.emoji_picker_source = source;
         self.emoji_picker_message_reactions = message_reactions;
@@ -1274,9 +1306,11 @@ impl AppState {
             self.selected_message()
         };
         match msg {
-            Some(m) => m.reactions.iter().map(|r| {
-                (r.name.clone(), r.users.contains(&self.self_user_id))
-            }).collect(),
+            Some(m) => m
+                .reactions
+                .iter()
+                .map(|r| (r.name.clone(), r.users.contains(&self.self_user_id)))
+                .collect(),
             None => vec![],
         }
     }
@@ -1374,13 +1408,19 @@ impl AppState {
         if matches!(self.emoji_picker_source, EmojiPickerSource::Reaction)
             && !self.emoji_picker_message_reactions.is_empty()
         {
-            let reaction_names: Vec<&str> = self.emoji_picker_message_reactions
-                .iter().map(|(n, _)| n.as_str()).collect();
+            let reaction_names: Vec<&str> = self
+                .emoji_picker_message_reactions
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect();
             let (mut msg_reactions, rest): (Vec<_>, Vec<_>) = results
                 .into_iter()
                 .partition(|(name, _, _)| reaction_names.contains(&name.as_str()));
             msg_reactions.sort_by_key(|(name, _, _)| {
-                reaction_names.iter().position(|n| n == name).unwrap_or(usize::MAX)
+                reaction_names
+                    .iter()
+                    .position(|n| n == name)
+                    .unwrap_or(usize::MAX)
             });
             results = msg_reactions;
             results.extend(rest);
@@ -1448,12 +1488,7 @@ impl AppState {
     /// Returns true if the image was placed (cached and ready), false if
     /// it was enqueued for loading. Callers should render a 2-cell-wide
     /// placeholder in either case.
-    pub fn place_inline_emoji(
-        &mut self,
-        name: &str,
-        screen_row: u16,
-        screen_col: u16,
-    ) -> bool {
+    pub fn place_inline_emoji(&mut self, name: &str, screen_row: u16, screen_col: u16) -> bool {
         if let Some(key) = self.resolve_emoji_key(name) {
             if self.custom_emoji_images.contains_key(&key) {
                 self.inline_emoji_placements.push(InlineEmojiPlacement {
@@ -1480,7 +1515,8 @@ impl AppState {
         let mut result: Vec<(String, Option<String>, Vec<usize>, Option<String>)> = Vec::new();
 
         // Build a lookup: channel_id -> section index (for user-defined sections)
-        let mut ch_to_section: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut ch_to_section: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
 
         // Sort sections by sort_order
         let mut sorted_sections: Vec<_> = self.channel_sections.iter().collect();
@@ -1495,7 +1531,9 @@ impl AppState {
             };
             let emoji_prefix = match &emoji_name {
                 Some(name) => {
-                    if let Some(unicode) = crate::ui::emoji::emoji_for_runtime(name, &self.standard_emoji) {
+                    if let Some(unicode) =
+                        crate::ui::emoji::emoji_for_runtime(name, &self.standard_emoji)
+                    {
                         format!("{} ", unicode)
                     } else {
                         // Custom emoji — render a placeholder, the image will be placed by channels.rs
@@ -1505,7 +1543,12 @@ impl AppState {
                 None => String::new(),
             };
             let name = format!("{}{}", emoji_prefix, section.name);
-            result.push((name, Some(section.channel_section_id.clone()), Vec::new(), emoji_name));
+            result.push((
+                name,
+                Some(section.channel_section_id.clone()),
+                Vec::new(),
+                emoji_name,
+            ));
             for ch_id in &section.channel_ids_page.channel_ids {
                 ch_to_section.insert(ch_id.as_str(), section_idx);
             }
@@ -1556,8 +1599,7 @@ impl AppState {
         if delta > 0 {
             self.selected_message_idx = self.selected_message_idx.saturating_sub(delta as usize);
         } else {
-            self.selected_message_idx =
-                (self.selected_message_idx + (-delta) as usize).min(max);
+            self.selected_message_idx = (self.selected_message_idx + (-delta) as usize).min(max);
         }
         self.messages_scroll_override = None;
         self.selected_message_idx != old
@@ -1567,11 +1609,14 @@ impl AppState {
     /// Positive delta = increase scroll_y (toward newer/bottom).
     /// Negative delta = decrease scroll_y (toward older/top).
     pub fn messages_scroll_lines(&mut self, delta: isize) -> bool {
-        let current = self.messages_scroll_override
+        let current = self
+            .messages_scroll_override
             .or(self.messages_render_info.as_ref().map(|r| r.scroll_y))
             .unwrap_or(0);
         let new = if delta > 0 {
-            current.saturating_add(delta as usize).min(self.max_scroll_offset)
+            current
+                .saturating_add(delta as usize)
+                .min(self.max_scroll_offset)
         } else {
             current.saturating_sub((-delta) as usize)
         };
@@ -1597,7 +1642,7 @@ fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slack::types::{Channel, ChannelSection, ChannelIdsPage};
+    use crate::slack::types::{Channel, ChannelIdsPage, ChannelSection};
 
     fn make_channel(id: &str, name: &str, is_im: bool) -> Channel {
         Channel {
@@ -1617,7 +1662,12 @@ mod tests {
         }
     }
 
-    fn make_section(id: &str, name: &str, channel_ids: Vec<&str>, sort_order: i32) -> ChannelSection {
+    fn make_section(
+        id: &str,
+        name: &str,
+        channel_ids: Vec<&str>,
+        sort_order: i32,
+    ) -> ChannelSection {
         ChannelSection {
             channel_section_id: id.into(),
             name: name.into(),
@@ -1676,7 +1726,9 @@ mod tests {
     #[test]
     fn resolve_custom_emoji_direct() {
         let mut state = AppState::new();
-        state.custom_emoji.insert("parrot".into(), "https://example.com/parrot.gif".into());
+        state
+            .custom_emoji
+            .insert("parrot".into(), "https://example.com/parrot.gif".into());
 
         assert_eq!(
             state.resolve_custom_emoji("parrot"),
@@ -1688,9 +1740,15 @@ mod tests {
     #[test]
     fn resolve_custom_emoji_alias_chain() {
         let mut state = AppState::new();
-        state.custom_emoji.insert("parrot".into(), "https://example.com/parrot.gif".into());
-        state.custom_emoji.insert("party_parrot".into(), "alias:parrot".into());
-        state.custom_emoji.insert("pp".into(), "alias:party_parrot".into());
+        state
+            .custom_emoji
+            .insert("parrot".into(), "https://example.com/parrot.gif".into());
+        state
+            .custom_emoji
+            .insert("party_parrot".into(), "alias:parrot".into());
+        state
+            .custom_emoji
+            .insert("pp".into(), "alias:party_parrot".into());
 
         assert_eq!(
             state.resolve_custom_emoji("pp"),

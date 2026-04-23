@@ -39,7 +39,5 @@ fn dirs_base() -> std::path::PathBuf {
         return std::path::PathBuf::from(config);
     }
     let home = std::env::var("HOME").expect("HOME not set");
-    std::path::PathBuf::from(home)
-        .join(".config")
-        .join("Slack")
+    std::path::PathBuf::from(home).join(".config").join("Slack")
 }

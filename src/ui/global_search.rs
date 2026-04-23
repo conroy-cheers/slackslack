@@ -1,9 +1,9 @@
 use crate::state::AppState;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
-use ratatui::Frame;
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let area = centered_rect(60, 70, frame.area());
@@ -28,7 +28,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         Line::from(vec![
             Span::styled("/ ", Style::default().fg(Color::Yellow)),
             Span::raw(&state.global_search_query),
-            Span::styled("  searching...", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "  searching...",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ])
     } else {
         let suffix = if !state.global_search_results.is_empty() {
@@ -37,7 +42,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 state.global_search_selected + 1,
                 state.global_search_total
             )
-        } else if !state.global_search_query.is_empty() && state.global_search_total == 0 && !state.global_search_loading {
+        } else if !state.global_search_query.is_empty()
+            && state.global_search_total == 0
+            && !state.global_search_loading
+        {
             String::new()
         } else {
             String::new()
@@ -58,7 +66,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Results list
     if state.global_search_results.is_empty() {
         if !state.global_search_query.is_empty() && !state.global_search_loading {
-            let hint = if state.global_search_total == 0 && !state.global_search_results.is_empty() {
+            let hint = if state.global_search_total == 0 && !state.global_search_results.is_empty()
+            {
                 "No results"
             } else {
                 "Press Enter to search"
@@ -85,11 +94,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
                 .as_ref()
                 .and_then(|c| c.name.as_deref())
                 .unwrap_or("?");
-            let username = m
-                .username
-                .as_deref()
-                .or(m.user.as_deref())
-                .unwrap_or("?");
+            let username = m.username.as_deref().or(m.user.as_deref()).unwrap_or("?");
 
             let prefix = format!("#{} @{}: ", channel_name, username);
             let text_budget = width.saturating_sub(prefix.len()).max(1);
@@ -107,7 +112,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             };
 
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    prefix,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(text_preview, style),
             ]))
         })

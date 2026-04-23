@@ -1,8 +1,13 @@
 use std::collections::HashMap;
 
 /// Look up emoji from the runtime-fetched database, falling back to the hardcoded table.
-pub fn emoji_for_runtime<'a>(shortcode: &str, standard_emoji: &'a HashMap<String, String>) -> Option<&'a str> {
-    standard_emoji.get(shortcode).map(|s| s.as_str())
+pub fn emoji_for_runtime<'a>(
+    shortcode: &str,
+    standard_emoji: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    standard_emoji
+        .get(shortcode)
+        .map(|s| s.as_str())
         .or_else(|| emoji_for(shortcode))
 }
 
@@ -441,7 +446,10 @@ pub fn replace_emoji_shortcodes(text: &str) -> String {
     replace_emoji_impl(text, |sc| emoji_for(sc))
 }
 
-pub fn replace_emoji_shortcodes_with_map(text: &str, standard_emoji: &HashMap<String, String>) -> String {
+pub fn replace_emoji_shortcodes_with_map(
+    text: &str,
+    standard_emoji: &HashMap<String, String>,
+) -> String {
     replace_emoji_impl(text, |sc| emoji_for_runtime(sc, standard_emoji))
 }
 
@@ -781,7 +789,11 @@ mod tests {
             seen.insert(name);
         }
         // Should have a reasonable number of entries
-        assert!(all.len() > 100, "expected >100 standard emoji, got {}", all.len());
+        assert!(
+            all.len() > 100,
+            "expected >100 standard emoji, got {}",
+            all.len()
+        );
     }
 
     #[test]

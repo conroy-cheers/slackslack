@@ -31,7 +31,10 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-        InputMode::Reaction | InputMode::EmojiPicker | InputMode::EmojiPreview | InputMode::UserPicker => Style::default()
+        InputMode::Reaction
+        | InputMode::EmojiPicker
+        | InputMode::EmojiPreview
+        | InputMode::UserPicker => Style::default()
             .fg(Color::Black)
             .bg(Color::Magenta)
             .add_modifier(Modifier::BOLD),

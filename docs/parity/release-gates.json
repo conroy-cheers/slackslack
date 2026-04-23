@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "statuses": {
+    "implemented_observed": {
+      "description": "Implemented and backed by concrete observation evidence",
+      "requires_evidence_kind_any_of": ["observed_capture", "replay_fixture", "desktop_local_state"],
+      "allows_release_ready": true
+    },
+    "implemented_seeded": {
+      "description": "Implemented with repo/docs seed evidence but not yet observation-backed",
+      "requires_evidence_kind_any_of": ["seed_note", "public_doc", "repo_observation"],
+      "allows_release_ready": false
+    },
+    "decode_covered": {
+      "description": "Parser-level coverage exists, but feature support is not fully claimed",
+      "requires_evidence_kind_any_of": ["unit_test", "schema_fixture"],
+      "allows_release_ready": false
+    },
+    "pending": {
+      "description": "Known target, not implemented in current wave",
+      "requires_evidence_kind_any_of": ["seed_note", "public_doc", "observed_capture", "repo_observation"],
+      "allows_release_ready": false
+    },
+    "excluded": {
+      "description": "Outside current scope",
+      "requires_evidence_kind_any_of": ["scope_policy"],
+      "allows_release_ready": false
+    }
+  },
+  "required_layers_for_release_ready": ["unit", "replay"],
+  "canary_requirement_for_release_ready": "recommended_not_required",
+  "release_gated_families": [
+    "bootstrap_session",
+    "conversations_workspace_metadata",
+    "messages_threads_reactions_pins",
+    "users_presence_profiles",
+    "search",
+    "files_media_metadata"
+  ]
+}

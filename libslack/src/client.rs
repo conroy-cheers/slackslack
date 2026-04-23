@@ -6,6 +6,26 @@ use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 use tokio::sync::mpsc;
 
 pub trait SlackApi: Clone + Send + Sync + 'static {
+    fn conversations_info(
+        &self,
+        channel: &str,
+    ) -> impl std::future::Future<Output = Result<ConversationsInfoData>> + Send;
+    fn conversations_members(
+        &self,
+        channel: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> impl std::future::Future<Output = Result<ConversationsMembersData>> + Send;
+    fn conversations_open(
+        &self,
+        users: &str,
+    ) -> impl std::future::Future<Output = Result<ConversationsOpenData>> + Send;
+    fn users_conversations(
+        &self,
+        types: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> impl std::future::Future<Output = Result<UsersConversationsData>> + Send;
     fn conversations_list_all(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<Channel>>> + Send;
@@ -18,6 +38,14 @@ pub trait SlackApi: Clone + Send + Sync + 'static {
     fn channel_sections_list(
         &self,
     ) -> impl std::future::Future<Output = Result<ChannelSectionsListData>> + Send;
+    fn users_profile_get(
+        &self,
+        user_id: Option<&str>,
+        include_labels: bool,
+    ) -> impl std::future::Future<Output = Result<UserProfileGetData>> + Send;
+    fn team_profile_get(
+        &self,
+    ) -> impl std::future::Future<Output = Result<TeamProfileGetData>> + Send;
     fn conversations_history(
         &self,
         channel: &str,
@@ -54,16 +82,20 @@ pub trait SlackApi: Clone + Send + Sync + 'static {
         timestamp: &str,
         name: &str,
     ) -> impl std::future::Future<Output = Result<ReactionsData>> + Send;
-    fn download_file(
-        &self,
-        url: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
+    fn download_file(&self, url: &str)
+    -> impl std::future::Future<Output = Result<Vec<u8>>> + Send;
     fn search_messages(
         &self,
         query: &str,
         page: u32,
         count: u32,
     ) -> impl std::future::Future<Output = Result<SearchMessagesData>> + Send;
+    fn search_files(
+        &self,
+        query: &str,
+        page: u32,
+        count: u32,
+    ) -> impl std::future::Future<Output = Result<SearchFilesData>> + Send;
     fn files_upload(
         &self,
         channel: &str,
@@ -71,6 +103,21 @@ pub trait SlackApi: Clone + Send + Sync + 'static {
         filename: &str,
         data: Vec<u8>,
     ) -> impl std::future::Future<Output = Result<FilesCompleteUploadData>> + Send;
+    fn files_info(
+        &self,
+        file: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> impl std::future::Future<Output = Result<FilesInfoData>> + Send;
+    fn files_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> impl std::future::Future<Output = Result<FilesListData>> + Send;
+    fn pins_list(
+        &self,
+        channel: &str,
+    ) -> impl std::future::Future<Output = Result<PinsListData>> + Send;
     fn spawn_realtime(
         &self,
         tx: mpsc::UnboundedSender<RealtimeEvent>,
@@ -139,8 +186,14 @@ impl SlackClient {
         }
 
         let body = resp.text().await?;
-        let parsed: SlackResponse<T> = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("Failed to parse {} response: {}\nBody: {}", method, e, &body[..body.len().min(500)]))?;
+        let parsed: SlackResponse<T> = serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse {} response: {}\nBody: {}",
+                method,
+                e,
+                &body[..body.len().min(500)]
+            )
+        })?;
 
         if !parsed.ok {
             bail!(
@@ -175,6 +228,43 @@ impl SlackClient {
             params.push(("cursor", c));
         }
         self.post("conversations.list", &params).await
+    }
+
+    pub async fn conversations_info(&self, channel: &str) -> Result<ConversationsInfoData> {
+        self.post("conversations.info", &[("channel", channel)])
+            .await
+    }
+
+    pub async fn conversations_members(
+        &self,
+        channel: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<ConversationsMembersData> {
+        let limit_str = limit.to_string();
+        let mut params: Vec<(&str, &str)> = vec![("channel", channel), ("limit", &limit_str)];
+        if let Some(cursor) = cursor {
+            params.push(("cursor", cursor));
+        }
+        self.post("conversations.members", &params).await
+    }
+
+    pub async fn conversations_open(&self, users: &str) -> Result<ConversationsOpenData> {
+        self.post("conversations.open", &[("users", users)]).await
+    }
+
+    pub async fn users_conversations(
+        &self,
+        types: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<UsersConversationsData> {
+        let limit_str = limit.to_string();
+        let mut params: Vec<(&str, &str)> = vec![("types", types), ("limit", &limit_str)];
+        if let Some(cursor) = cursor {
+            params.push(("cursor", cursor));
+        }
+        self.post("users.conversations", &params).await
     }
 
     /// Fetch all channels the user is a member of, paginating automatically.
@@ -240,7 +330,11 @@ impl SlackClient {
         .await
     }
 
-    pub async fn conversations_mark(&self, channel: &str, ts: &str) -> Result<ConversationsMarkData> {
+    pub async fn conversations_mark(
+        &self,
+        channel: &str,
+        ts: &str,
+    ) -> Result<ConversationsMarkData> {
         self.post("conversations.mark", &[("channel", channel), ("ts", ts)])
             .await
     }
@@ -266,7 +360,11 @@ impl SlackClient {
     ) -> Result<ReactionsData> {
         self.post(
             "reactions.add",
-            &[("channel", channel), ("timestamp", timestamp), ("name", name)],
+            &[
+                ("channel", channel),
+                ("timestamp", timestamp),
+                ("name", name),
+            ],
         )
         .await
     }
@@ -279,7 +377,11 @@ impl SlackClient {
     ) -> Result<ReactionsData> {
         self.post(
             "reactions.remove",
-            &[("channel", channel), ("timestamp", timestamp), ("name", name)],
+            &[
+                ("channel", channel),
+                ("timestamp", timestamp),
+                ("name", name),
+            ],
         )
         .await
     }
@@ -295,6 +397,23 @@ impl SlackClient {
 
     pub async fn users_info(&self, user_id: &str) -> Result<UserInfoData> {
         self.post("users.info", &[("user", user_id)]).await
+    }
+
+    pub async fn users_profile_get(
+        &self,
+        user_id: Option<&str>,
+        include_labels: bool,
+    ) -> Result<UserProfileGetData> {
+        let include_labels_value = if include_labels { "true" } else { "false" };
+        let mut params = vec![("include_labels", include_labels_value)];
+        if let Some(user_id) = user_id {
+            params.push(("user", user_id));
+        }
+        self.post("users.profile.get", &params).await
+    }
+
+    pub async fn team_profile_get(&self) -> Result<TeamProfileGetData> {
+        self.post("team.profile.get", &[]).await
     }
 
     pub async fn rtm_connect(&self) -> Result<RtmConnectData> {
@@ -331,6 +450,27 @@ impl SlackClient {
         .await
     }
 
+    pub async fn search_files(
+        &self,
+        query: &str,
+        page: u32,
+        count: u32,
+    ) -> Result<SearchFilesData> {
+        let page_str = page.to_string();
+        let count_str = count.to_string();
+        self.post(
+            "search.files",
+            &[
+                ("query", query),
+                ("page", &page_str),
+                ("count", &count_str),
+                ("sort", "timestamp"),
+                ("sort_dir", "desc"),
+            ],
+        )
+        .await
+    }
+
     pub async fn files_get_upload_url(
         &self,
         filename: &str,
@@ -351,10 +491,8 @@ impl SlackClient {
         thread_ts: Option<&str>,
     ) -> Result<FilesCompleteUploadData> {
         let files_json = serde_json::json!([{"id": file_id}]).to_string();
-        let mut params: Vec<(&str, &str)> = vec![
-            ("files", &files_json),
-            ("channel_id", channel_id),
-        ];
+        let mut params: Vec<(&str, &str)> =
+            vec![("files", &files_json), ("channel_id", channel_id)];
         if let Some(ts) = thread_ts {
             params.push(("thread_ts", ts));
         }
@@ -382,6 +520,43 @@ impl SlackClient {
             .await
     }
 
+    pub async fn files_info(
+        &self,
+        file: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<FilesInfoData> {
+        let limit_str = limit.map(|v| v.to_string());
+        let mut params: Vec<(&str, &str)> = vec![("file", file)];
+        if let Some(cursor) = cursor {
+            params.push(("cursor", cursor));
+        }
+        if let Some(limit_str) = limit_str.as_deref() {
+            params.push(("limit", limit_str));
+        }
+        self.post("files.info", &params).await
+    }
+
+    pub async fn files_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<FilesListData> {
+        let limit_str = limit.map(|v| v.to_string());
+        let mut params: Vec<(&str, &str)> = Vec::new();
+        if let Some(cursor) = cursor {
+            params.push(("cursor", cursor));
+        }
+        if let Some(limit_str) = limit_str.as_deref() {
+            params.push(("count", limit_str));
+        }
+        self.post("files.list", &params).await
+    }
+
+    pub async fn pins_list(&self, channel: &str) -> Result<PinsListData> {
+        self.post("pins.list", &[("channel", channel)]).await
+    }
+
     /// Download a file from a Slack private URL (uses cookie auth).
     pub async fn download_file_raw(&self, url: &str) -> Result<Vec<u8>> {
         let resp = self.http.get(url).send().await?;
@@ -394,6 +569,32 @@ impl SlackClient {
 }
 
 impl SlackApi for SlackClient {
+    async fn conversations_info(&self, channel: &str) -> Result<ConversationsInfoData> {
+        self.conversations_info(channel).await
+    }
+
+    async fn conversations_members(
+        &self,
+        channel: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<ConversationsMembersData> {
+        self.conversations_members(channel, cursor, limit).await
+    }
+
+    async fn conversations_open(&self, users: &str) -> Result<ConversationsOpenData> {
+        self.conversations_open(users).await
+    }
+
+    async fn users_conversations(
+        &self,
+        types: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<UsersConversationsData> {
+        self.users_conversations(types, cursor, limit).await
+    }
+
     async fn conversations_list_all(&self) -> Result<Vec<Channel>> {
         self.conversations_list_all().await
     }
@@ -410,6 +611,18 @@ impl SlackApi for SlackClient {
         self.channel_sections_list().await
     }
 
+    async fn users_profile_get(
+        &self,
+        user_id: Option<&str>,
+        include_labels: bool,
+    ) -> Result<UserProfileGetData> {
+        self.users_profile_get(user_id, include_labels).await
+    }
+
+    async fn team_profile_get(&self) -> Result<TeamProfileGetData> {
+        self.team_profile_get().await
+    }
+
     async fn conversations_history(
         &self,
         channel: &str,
@@ -417,7 +630,8 @@ impl SlackApi for SlackClient {
         oldest: Option<&str>,
         latest: Option<&str>,
     ) -> Result<ConversationsHistoryData> {
-        self.conversations_history(channel, limit, oldest, latest).await
+        self.conversations_history(channel, limit, oldest, latest)
+            .await
     }
 
     async fn conversations_replies(
@@ -473,6 +687,10 @@ impl SlackApi for SlackClient {
         self.search_messages(query, page, count).await
     }
 
+    async fn search_files(&self, query: &str, page: u32, count: u32) -> Result<SearchFilesData> {
+        self.search_files(query, page, count).await
+    }
+
     async fn files_upload(
         &self,
         channel: &str,
@@ -481,6 +699,23 @@ impl SlackApi for SlackClient {
         data: Vec<u8>,
     ) -> Result<FilesCompleteUploadData> {
         self.files_upload(channel, thread_ts, filename, data).await
+    }
+
+    async fn files_info(
+        &self,
+        file: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<FilesInfoData> {
+        self.files_info(file, cursor, limit).await
+    }
+
+    async fn files_list(&self, cursor: Option<&str>, limit: Option<u32>) -> Result<FilesListData> {
+        self.files_list(cursor, limit).await
+    }
+
+    async fn pins_list(&self, channel: &str) -> Result<PinsListData> {
+        self.pins_list(channel).await
     }
 
     fn spawn_realtime(

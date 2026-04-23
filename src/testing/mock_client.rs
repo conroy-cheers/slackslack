@@ -71,12 +71,7 @@ impl MockSlackClient {
             .insert(channel_id.to_string(), msgs);
     }
 
-    pub fn add_thread_replies(
-        &self,
-        channel_id: &str,
-        thread_ts: &str,
-        msgs: Vec<Message>,
-    ) {
+    pub fn add_thread_replies(&self, channel_id: &str, thread_ts: &str, msgs: Vec<Message>) {
         self.thread_replies
             .lock()
             .unwrap()
@@ -97,6 +92,38 @@ impl MockSlackClient {
 }
 
 impl SlackApi for MockSlackClient {
+    fn conversations_info(
+        &self,
+        _channel: &str,
+    ) -> impl std::future::Future<Output = Result<ConversationsInfoData>> + Send {
+        async { Ok(ConversationsInfoData::default()) }
+    }
+
+    fn conversations_members(
+        &self,
+        _channel: &str,
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> impl std::future::Future<Output = Result<ConversationsMembersData>> + Send {
+        async { Ok(ConversationsMembersData::default()) }
+    }
+
+    fn conversations_open(
+        &self,
+        _users: &str,
+    ) -> impl std::future::Future<Output = Result<ConversationsOpenData>> + Send {
+        async { Ok(ConversationsOpenData::default()) }
+    }
+
+    fn users_conversations(
+        &self,
+        _types: &str,
+        _cursor: Option<&str>,
+        _limit: u32,
+    ) -> impl std::future::Future<Output = Result<UsersConversationsData>> + Send {
+        async { Ok(UsersConversationsData::default()) }
+    }
+
     fn conversations_list_all(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<Channel>>> + Send {
@@ -121,6 +148,20 @@ impl SlackApi for MockSlackClient {
         async { Ok(ChannelSectionsListData::default()) }
     }
 
+    fn users_profile_get(
+        &self,
+        _user_id: Option<&str>,
+        _include_labels: bool,
+    ) -> impl std::future::Future<Output = Result<UserProfileGetData>> + Send {
+        async { Ok(UserProfileGetData::default()) }
+    }
+
+    fn team_profile_get(
+        &self,
+    ) -> impl std::future::Future<Output = Result<TeamProfileGetData>> + Send {
+        async { Ok(TeamProfileGetData::default()) }
+    }
+
     fn conversations_history(
         &self,
         channel: &str,
@@ -136,10 +177,7 @@ impl SlackApi for MockSlackClient {
             .get(&channel)
             .cloned()
             .unwrap_or_default();
-        self.record(ApiCall::LoadHistory {
-            channel,
-            limit,
-        });
+        self.record(ApiCall::LoadHistory { channel, limit });
         async move {
             Ok(ConversationsHistoryData {
                 messages: msgs,
@@ -259,6 +297,15 @@ impl SlackApi for MockSlackClient {
         async { Ok(SearchMessagesData::default()) }
     }
 
+    fn search_files(
+        &self,
+        _query: &str,
+        _page: u32,
+        _count: u32,
+    ) -> impl std::future::Future<Output = Result<SearchFilesData>> + Send {
+        async { Ok(SearchFilesData::default()) }
+    }
+
     fn files_upload(
         &self,
         channel: &str,
@@ -272,6 +319,30 @@ impl SlackApi for MockSlackClient {
             thread_ts: thread_ts.map(|s| s.to_string()),
         });
         async { Ok(FilesCompleteUploadData::default()) }
+    }
+
+    fn files_info(
+        &self,
+        _file: &str,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> impl std::future::Future<Output = Result<FilesInfoData>> + Send {
+        async { Ok(FilesInfoData::default()) }
+    }
+
+    fn files_list(
+        &self,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> impl std::future::Future<Output = Result<FilesListData>> + Send {
+        async { Ok(FilesListData::default()) }
+    }
+
+    fn pins_list(
+        &self,
+        _channel: &str,
+    ) -> impl std::future::Future<Output = Result<PinsListData>> + Send {
+        async { Ok(PinsListData::default()) }
     }
 
     fn spawn_realtime(

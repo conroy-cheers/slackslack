@@ -37,10 +37,7 @@ fn setup_workspace() -> TestHarness {
     );
     h.add_messages(
         "C_RAND",
-        vec![
-            msg("random old", "2000.000"),
-            msg("random new", "2001.000"),
-        ],
+        vec![msg("random old", "2000.000"), msg("random new", "2001.000")],
     );
     h.add_messages(
         "D_ALICE",
@@ -247,9 +244,15 @@ async fn send_message_posts_to_active_channel() {
     h.press_enter();
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    let post = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }));
     match post {
-        Some(ApiCall::PostMessage { channel, text, thread_ts }) => {
+        Some(ApiCall::PostMessage {
+            channel,
+            text,
+            thread_ts,
+        }) => {
             assert_eq!(channel, "C_GEN");
             assert_eq!(text, "test msg");
             assert!(thread_ts.is_none());
@@ -271,7 +274,9 @@ async fn send_message_to_dm() {
     h.press_enter();
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    let post = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }));
     match post {
         Some(ApiCall::PostMessage { channel, text, .. }) => {
             assert_eq!(channel, "D_ALICE");
@@ -339,9 +344,15 @@ async fn thread_reply_posts_with_thread_ts() {
     h.press_enter(); // send
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    let post = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }));
     match post {
-        Some(ApiCall::PostMessage { channel, text, thread_ts }) => {
+        Some(ApiCall::PostMessage {
+            channel,
+            text,
+            thread_ts,
+        }) => {
             assert_eq!(channel, "C_GEN");
             assert_eq!(text, "thread reply");
             assert_eq!(thread_ts.as_deref(), Some("1001.000"));
@@ -465,7 +476,12 @@ async fn message_search_finds_matching_message() {
 #[tokio::test]
 async fn ws_message_pushes_to_channel() {
     let mut h = setup_workspace();
-    let initial_count = h.state.channel_data.get("C_GEN").map(|cd| cd.messages.len()).unwrap_or(0);
+    let initial_count = h
+        .state
+        .channel_data
+        .get("C_GEN")
+        .map(|cd| cd.messages.len())
+        .unwrap_or(0);
     h.send_event(Event::SlackWsEvent(WsEvent::Message(
         crate::slack::types::WsMessage {
             channel: Some("C_GEN".into()),
@@ -478,7 +494,12 @@ async fn ws_message_pushes_to_channel() {
             previous_message: None,
         },
     )));
-    let new_count = h.state.channel_data.get("C_GEN").map(|cd| cd.messages.len()).unwrap_or(0);
+    let new_count = h
+        .state
+        .channel_data
+        .get("C_GEN")
+        .map(|cd| cd.messages.len())
+        .unwrap_or(0);
     assert_eq!(new_count, initial_count + 1);
 }
 
@@ -685,7 +706,13 @@ async fn ws_thread_reply_appears_in_open_thread() {
     assert_eq!(h.thread_message_count(), 2);
 
     // Now a new WS message arrives in this thread
-    h.send_event(ws_msg("C_GEN", "U_ALICE", "new reply via ws", "1001.003", Some("1001.000")));
+    h.send_event(ws_msg(
+        "C_GEN",
+        "U_ALICE",
+        "new reply via ws",
+        "1001.003",
+        Some("1001.000"),
+    ));
 
     // The new reply must appear in thread_messages
     assert_eq!(
@@ -708,14 +735,18 @@ async fn ws_thread_reply_for_different_thread_does_not_pollute_open_thread() {
     h.send_event(Event::ThreadLoaded {
         channel_id: "C_GEN".into(),
         thread_ts: "1001.000".into(),
-        messages: vec![
-            msg("middle message", "1001.000"),
-        ],
+        messages: vec![msg("middle message", "1001.000")],
     });
     assert_eq!(h.thread_message_count(), 1);
 
     // WS reply for a DIFFERENT thread in the same channel
-    h.send_event(ws_msg("C_GEN", "U_BOB", "other thread reply", "9999.001", Some("9999.000")));
+    h.send_event(ws_msg(
+        "C_GEN",
+        "U_BOB",
+        "other thread reply",
+        "9999.001",
+        Some("9999.000"),
+    ));
 
     // Should NOT appear in the open thread
     assert_eq!(
@@ -739,7 +770,13 @@ async fn ws_thread_reply_for_different_channel_does_not_pollute_open_thread() {
     });
 
     // WS reply for a thread in C_RAND, not C_GEN
-    h.send_event(ws_msg("C_RAND", "U_BOB", "wrong channel", "5000.001", Some("1001.000")));
+    h.send_event(ws_msg(
+        "C_RAND",
+        "U_BOB",
+        "wrong channel",
+        "5000.001",
+        Some("1001.000"),
+    ));
 
     assert_eq!(
         h.thread_message_count(),
@@ -762,7 +799,13 @@ async fn ws_channel_message_without_thread_ts_does_not_go_to_thread() {
     });
 
     // A regular (non-threaded) message in the same channel
-    h.send_event(ws_msg("C_GEN", "U_ALICE", "top-level msg", "8000.000", None));
+    h.send_event(ws_msg(
+        "C_GEN",
+        "U_ALICE",
+        "top-level msg",
+        "8000.000",
+        None,
+    ));
 
     assert_eq!(
         h.thread_message_count(),
@@ -790,7 +833,13 @@ async fn send_thread_reply_appears_in_thread_after_ws_echo() {
     h.yield_to_spawned_tasks().await;
 
     // Simulate the WS echo of our own sent message
-    h.send_event(ws_msg("C_GEN", "U_ME", "my new reply", "1001.005", Some("1001.000")));
+    h.send_event(ws_msg(
+        "C_GEN",
+        "U_ME",
+        "my new reply",
+        "1001.005",
+        Some("1001.000"),
+    ));
 
     assert_eq!(
         h.thread_message_count(),
@@ -809,7 +858,13 @@ async fn ws_thread_reply_does_not_appear_in_channel_messages() {
     let initial_count = h.state.channel_data.get("C_GEN").unwrap().messages.len();
 
     // A thread reply arrives via WS (thread_ts != ts, so it's a reply not a parent)
-    h.send_event(ws_msg("C_GEN", "U_ALICE", "thread only reply", "1001.003", Some("1001.000")));
+    h.send_event(ws_msg(
+        "C_GEN",
+        "U_ALICE",
+        "thread only reply",
+        "1001.003",
+        Some("1001.000"),
+    ));
 
     let cd = h.state.channel_data.get("C_GEN").unwrap();
     assert_eq!(
@@ -841,10 +896,15 @@ async fn emoji_picker_confirm_sends_reaction() {
     h.assert_mode(InputMode::Normal);
     // Should have sent a reaction API call
     let calls = h.api_calls();
-    let reaction = calls.iter().find(|c| matches!(c, ApiCall::AddReaction { .. }));
-    assert!(reaction.is_some(), "expected AddReaction call, got {:?}", calls);
+    let reaction = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::AddReaction { .. }));
+    assert!(
+        reaction.is_some(),
+        "expected AddReaction call, got {:?}",
+        calls
+    );
 }
-
 
 // ── Input editing ──────────────────────────────────────────────────────
 
@@ -890,7 +950,9 @@ async fn empty_message_not_sent() {
     h.press_enter(); // send with empty input
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    let post = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }));
     assert!(post.is_none(), "empty message should not be sent");
 }
 
@@ -903,7 +965,9 @@ async fn whitespace_only_message_not_sent() {
     h.press_enter();
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    let post = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }));
     assert!(post.is_none(), "whitespace-only message should not be sent");
 }
 
@@ -929,7 +993,6 @@ async fn input_history_up_down() {
 }
 
 // ── Unread counts ──────────────────────────────────────────────────────
-
 
 // ── Channel navigation edge cases ─────────────────────────────────────
 
@@ -1005,10 +1068,20 @@ async fn rapid_ws_messages_all_appended() {
     let mut h = setup_workspace();
     let initial = h.state.channel_data.get("C_GEN").unwrap().messages.len();
     for i in 0..10 {
-        h.send_event(ws_msg("C_GEN", "U_ALICE", &format!("rapid {}", i), &format!("5000.{:03}", i), None));
+        h.send_event(ws_msg(
+            "C_GEN",
+            "U_ALICE",
+            &format!("rapid {}", i),
+            &format!("5000.{:03}", i),
+            None,
+        ));
     }
     let final_count = h.state.channel_data.get("C_GEN").unwrap().messages.len();
-    assert_eq!(final_count, initial + 10, "all 10 rapid messages should be appended");
+    assert_eq!(
+        final_count,
+        initial + 10,
+        "all 10 rapid messages should be appended"
+    );
 }
 
 #[tokio::test]
@@ -1018,7 +1091,11 @@ async fn duplicate_ws_message_not_added_twice() {
     h.send_event(ws_msg("C_GEN", "U_ALICE", "dup msg", "5000.000", None));
     h.send_event(ws_msg("C_GEN", "U_ALICE", "dup msg", "5000.000", None));
     let final_count = h.state.channel_data.get("C_GEN").unwrap().messages.len();
-    assert_eq!(final_count, initial + 1, "duplicate message should not be added twice");
+    assert_eq!(
+        final_count,
+        initial + 1,
+        "duplicate message should not be added twice"
+    );
 }
 
 // ── WS events for unknown channels ────────────────────────────────────
@@ -1027,9 +1104,23 @@ async fn duplicate_ws_message_not_added_twice() {
 async fn ws_message_for_unknown_channel_creates_channel_data() {
     let mut h = setup_workspace();
     assert!(!h.state.channel_data.contains_key("C_UNKNOWN"));
-    h.send_event(ws_msg("C_UNKNOWN", "U_ALICE", "hello unknown", "9000.000", None));
+    h.send_event(ws_msg(
+        "C_UNKNOWN",
+        "U_ALICE",
+        "hello unknown",
+        "9000.000",
+        None,
+    ));
     assert!(h.state.channel_data.contains_key("C_UNKNOWN"));
-    assert_eq!(h.state.channel_data.get("C_UNKNOWN").unwrap().messages.len(), 1);
+    assert_eq!(
+        h.state
+            .channel_data
+            .get("C_UNKNOWN")
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
 }
 
 // ── Disconnect / reconnect ────────────────────────────────────────────
@@ -1037,7 +1128,10 @@ async fn ws_message_for_unknown_channel_creates_channel_data() {
 #[tokio::test]
 async fn disconnect_event_sets_connected_false() {
     let mut h = setup_workspace();
-    h.send_event(Event::SlackConnected { self_id: "U_ME".into(), team: "T".into() });
+    h.send_event(Event::SlackConnected {
+        self_id: "U_ME".into(),
+        team: "T".into(),
+    });
     assert!(h.is_connected());
     h.send_event(Event::SlackDisconnected);
     assert!(!h.is_connected());
@@ -1063,8 +1157,14 @@ async fn insert_from_channel_list_does_not_reply_to_thread() {
     h.press_enter();
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    if let Some(ApiCall::PostMessage { thread_ts, .. }) = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. })) {
-        assert!(thread_ts.is_none(), "message from channel list should not have thread_ts");
+    if let Some(ApiCall::PostMessage { thread_ts, .. }) = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }))
+    {
+        assert!(
+            thread_ts.is_none(),
+            "message from channel list should not have thread_ts"
+        );
     }
 }
 
@@ -1126,7 +1226,10 @@ async fn thread_loaded_replaces_thread_messages() {
     h.send_event(Event::ThreadLoaded {
         channel_id: "C_GEN".into(),
         thread_ts: "1001.000".into(),
-        messages: vec![msg("parent", "1001.000"), thread_msg("r1", "1001.001", "1001.000")],
+        messages: vec![
+            msg("parent", "1001.000"),
+            thread_msg("r1", "1001.001", "1001.000"),
+        ],
     });
     assert_eq!(h.thread_message_count(), 2);
 
@@ -1187,7 +1290,11 @@ async fn user_picker_confirm_inserts_mention() {
     h.assert_mode(InputMode::Insert);
     // Should have inserted a mention
     let text = h.input_text().to_string();
-    assert!(text.contains("<@U_ALICE|Alice>"), "expected mention in input, got: {}", text);
+    assert!(
+        text.contains("<@U_ALICE|Alice>"),
+        "expected mention in input, got: {}",
+        text
+    );
 }
 
 // ── Message sent event ─────────────────────────────────────────────────
@@ -1230,7 +1337,10 @@ async fn i_from_messages_does_not_set_reply_to_thread_even_when_thread_open() {
     h.assert_focus(Focus::Messages);
     assert!(h.thread_open());
     h.press_char('i'); // insert from Messages
-    assert!(!h.reply_to_thread(), "i from Messages should NOT reply to thread");
+    assert!(
+        !h.reply_to_thread(),
+        "i from Messages should NOT reply to thread"
+    );
 }
 
 #[tokio::test]
@@ -1239,7 +1349,10 @@ async fn big_r_from_messages_sets_reply_to_thread() {
     h.press_enter(); // -> Messages
     h.press_char('k'); // select middle
     h.press_char('R');
-    assert!(h.reply_to_thread(), "R from Messages should reply to thread");
+    assert!(
+        h.reply_to_thread(),
+        "R from Messages should reply to thread"
+    );
 }
 
 // ── Switching channels clears thread state ─────────────────────────────
@@ -1277,10 +1390,25 @@ async fn dm_channel_shows_user_display_name() {
 async fn own_message_does_not_increment_unread() {
     let mut h = setup_workspace();
     h.set_self_user("U_ME");
-    let before = h.state.channels.iter().find(|c| c.id == "C_RAND").unwrap().unread_count_display;
+    let before = h
+        .state
+        .channels
+        .iter()
+        .find(|c| c.id == "C_RAND")
+        .unwrap()
+        .unread_count_display;
     h.send_event(ws_msg("C_RAND", "U_ME", "my own msg", "2002.000", None));
-    let after = h.state.channels.iter().find(|c| c.id == "C_RAND").unwrap().unread_count_display;
-    assert_eq!(after, before, "own messages should not increment unread count");
+    let after = h
+        .state
+        .channels
+        .iter()
+        .find(|c| c.id == "C_RAND")
+        .unwrap()
+        .unread_count_display;
+    assert_eq!(
+        after, before,
+        "own messages should not increment unread count"
+    );
 }
 
 // ── Unicode cursor safety ─────────────────────────────────────────────
@@ -1397,7 +1525,9 @@ async fn enter_sends_multiline() {
     h.press_enter(); // send
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let post = calls.iter().find(|c| matches!(c, ApiCall::PostMessage { .. }));
+    let post = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::PostMessage { .. }));
     match post {
         Some(ApiCall::PostMessage { text, .. }) => {
             assert_eq!(text, "line1\nline2");
@@ -1568,7 +1698,11 @@ async fn mouse_scroll_up_decreases_scroll_y() {
     h.scroll_up_in(area);
     // ScrollUp should decrease scroll_y (toward older/top)
     let new_scroll = h.state.messages_scroll_override.unwrap();
-    assert!(new_scroll < 100, "ScrollUp should decrease scroll_y, got {}", new_scroll);
+    assert!(
+        new_scroll < 100,
+        "ScrollUp should decrease scroll_y, got {}",
+        new_scroll
+    );
 }
 
 #[tokio::test]
@@ -1589,7 +1723,11 @@ async fn mouse_scroll_down_increases_scroll_y() {
 
     h.scroll_down_in(area);
     let new_scroll = h.state.messages_scroll_override.unwrap();
-    assert!(new_scroll > 100, "ScrollDown should increase scroll_y, got {}", new_scroll);
+    assert!(
+        new_scroll > 100,
+        "ScrollDown should increase scroll_y, got {}",
+        new_scroll
+    );
 }
 
 #[tokio::test]
@@ -1694,7 +1832,13 @@ async fn file_path_enter_nonexistent_shows_error() {
     h.press_ctrl('o');
     h.type_text("/nonexistent/file.png");
     h.press_enter();
-    assert!(h.state.upload_status.as_ref().unwrap().contains("Read error"));
+    assert!(
+        h.state
+            .upload_status
+            .as_ref()
+            .unwrap()
+            .contains("Read error")
+    );
     h.assert_mode(InputMode::FilePath);
 }
 
@@ -1711,9 +1855,13 @@ async fn file_path_upload_real_file() {
     h.yield_to_spawned_tasks().await;
 
     let calls = h.api_calls();
-    let upload = calls.iter().find(|c| matches!(c, ApiCall::FilesUpload { .. }));
+    let upload = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::FilesUpload { .. }));
     match upload {
-        Some(ApiCall::FilesUpload { channel, filename, .. }) => {
+        Some(ApiCall::FilesUpload {
+            channel, filename, ..
+        }) => {
             assert_eq!(channel, "C_GEN");
             assert_eq!(filename, "Cargo.toml");
         }
@@ -1776,7 +1924,11 @@ async fn context_menu_wraps_around() {
 
 // ── Reaction toggle tests ─────────────────────────────────────────────
 
-fn msg_with_reactions(text: &str, ts: &str, reactions: Vec<Reaction>) -> crate::slack::types::Message {
+fn msg_with_reactions(
+    text: &str,
+    ts: &str,
+    reactions: Vec<Reaction>,
+) -> crate::slack::types::Message {
     let mut m = msg(text, ts);
     m.reactions = reactions;
     m
@@ -1792,10 +1944,22 @@ fn setup_workspace_with_reactions() -> TestHarness {
         "C_GEN",
         vec![
             msg("no reactions", "1000.000"),
-            msg_with_reactions("has reactions", "1001.000", vec![
-                Reaction { name: "thumbsup".into(), count: 2, users: vec!["U_ME".into(), "U_ALICE".into()] },
-                Reaction { name: "fire".into(), count: 1, users: vec!["U_ALICE".into()] },
-            ]),
+            msg_with_reactions(
+                "has reactions",
+                "1001.000",
+                vec![
+                    Reaction {
+                        name: "thumbsup".into(),
+                        count: 2,
+                        users: vec!["U_ME".into(), "U_ALICE".into()],
+                    },
+                    Reaction {
+                        name: "fire".into(),
+                        count: 1,
+                        users: vec!["U_ALICE".into()],
+                    },
+                ],
+            ),
         ],
     );
     h
@@ -1815,8 +1979,14 @@ async fn emoji_picker_toggle_removes_own_reaction() {
     h.yield_to_spawned_tasks().await;
     h.assert_mode(InputMode::Normal);
     let calls = h.api_calls();
-    let remove = calls.iter().find(|c| matches!(c, ApiCall::RemoveReaction { .. }));
-    assert!(remove.is_some(), "expected RemoveReaction call, got {:?}", calls);
+    let remove = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::RemoveReaction { .. }));
+    assert!(
+        remove.is_some(),
+        "expected RemoveReaction call, got {:?}",
+        calls
+    );
 }
 
 #[tokio::test]
@@ -1827,11 +1997,16 @@ async fn emoji_picker_toggle_adds_others_reaction() {
     h.press_char('r');
     // Navigate to "fire" (2nd result) — user hasn't reacted
     h.press_char('j');
-    assert_eq!(h.state.emoji_picker_results[h.state.emoji_picker_selected].0, "fire");
+    assert_eq!(
+        h.state.emoji_picker_results[h.state.emoji_picker_selected].0,
+        "fire"
+    );
     h.press_enter();
     h.yield_to_spawned_tasks().await;
     let calls = h.api_calls();
-    let add = calls.iter().find(|c| matches!(c, ApiCall::AddReaction { .. }));
+    let add = calls
+        .iter()
+        .find(|c| matches!(c, ApiCall::AddReaction { .. }));
     assert!(add.is_some(), "expected AddReaction call, got {:?}", calls);
 }
 
@@ -1894,9 +2069,19 @@ async fn inline_emoji_picker_confirm_replaces_query() {
     h.press_char('c');
     h.press_char('k');
     assert_eq!(h.state.input_text, "hi :rock");
-    assert!(h.state.emoji_picker_results.iter().any(|(name, _, _)| name == "rocket"));
+    assert!(
+        h.state
+            .emoji_picker_results
+            .iter()
+            .any(|(name, _, _)| name == "rocket")
+    );
     // Select rocket and confirm
-    let rocket_idx = h.state.emoji_picker_results.iter().position(|(n, _, _)| n == "rocket").unwrap();
+    let rocket_idx = h
+        .state
+        .emoji_picker_results
+        .iter()
+        .position(|(n, _, _)| n == "rocket")
+        .unwrap();
     h.state.emoji_picker_selected = rocket_idx;
     h.press_enter();
     assert_eq!(h.state.input_mode, InputMode::Insert);

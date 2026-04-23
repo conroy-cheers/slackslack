@@ -87,8 +87,7 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0f32; 4]; 4];
     for col in 0..4 {
         for row in 0..4 {
-            out[col][row] =
-                a[0][row] * b[col][0]
+            out[col][row] = a[0][row] * b[col][0]
                 + a[1][row] * b[col][1]
                 + a[2][row] * b[col][2]
                 + a[3][row] * b[col][3];
@@ -100,33 +99,41 @@ fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
 fn mat4_rotate_y(angle: f32) -> [[f32; 4]; 4] {
     let c = angle.cos();
     let s = angle.sin();
-    [[ c, 0.0,  s, 0.0],
-     [0.0, 1.0, 0.0, 0.0],
-     [-s, 0.0,  c, 0.0],
-     [0.0, 0.0, 0.0, 1.0]]
+    [
+        [c, 0.0, s, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [-s, 0.0, c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 fn mat4_rotate_x(angle: f32) -> [[f32; 4]; 4] {
     let c = angle.cos();
     let s = angle.sin();
-    [[1.0, 0.0, 0.0, 0.0],
-     [0.0,  c,  s, 0.0],
-     [0.0, -s,  c, 0.0],
-     [0.0, 0.0, 0.0, 1.0]]
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, c, s, 0.0],
+        [0.0, -s, c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 fn mat4_translate(tx: f32, ty: f32, tz: f32) -> [[f32; 4]; 4] {
-    [[1.0, 0.0, 0.0, 0.0],
-     [0.0, 1.0, 0.0, 0.0],
-     [0.0, 0.0, 1.0, 0.0],
-     [ tx,  ty,  tz, 1.0]]
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [tx, ty, tz, 1.0],
+    ]
 }
 
 fn mat4_scale(sx: f32, sy: f32, sz: f32) -> [[f32; 4]; 4] {
-    [[ sx, 0.0, 0.0, 0.0],
-     [0.0,  sy, 0.0, 0.0],
-     [0.0, 0.0,  sz, 0.0],
-     [0.0, 0.0, 0.0, 1.0]]
+    [
+        [sx, 0.0, 0.0, 0.0],
+        [0.0, sy, 0.0, 0.0],
+        [0.0, 0.0, sz, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 4] = [
@@ -185,10 +192,12 @@ fn halton(index: u32, base: u32) -> f32 {
 fn mat4_perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
     let f = 1.0 / (fov_y * 0.5).tan();
     let nf = 1.0 / (near - far);
-    [[ f / aspect, 0.0, 0.0,               0.0],
-     [ 0.0,       f,   0.0,               0.0],
-     [ 0.0,       0.0, far * nf,          -1.0],
-     [ 0.0,       0.0, near * far * nf,    0.0]]
+    [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, far * nf, -1.0],
+        [0.0, 0.0, near * far * nf, 0.0],
+    ]
 }
 
 fn screen_aabb_from_mvp(
@@ -232,10 +241,12 @@ fn mat4_shadow_projection(light: [f32; 3], ground_y: f32) -> [[f32; 4]; 4] {
     let [lx, ly, lz] = light;
     let g = ground_y;
     let dot = ly - g;
-    [[ dot,          0.0,          0.0,         0.0],
-     [-lx,          -g,           -lz,         -1.0],
-     [ 0.0,          0.0,          dot,          0.0],
-     [ lx * g,       ly * g,       lz * g,      ly ]]
+    [
+        [dot, 0.0, 0.0, 0.0],
+        [-lx, -g, -lz, -1.0],
+        [0.0, 0.0, dot, 0.0],
+        [lx * g, ly * g, lz * g, ly],
+    ]
 }
 
 pub struct GpuRenderer {
@@ -668,12 +679,11 @@ impl GpuRenderer {
                     },
                 ],
             });
-        let ssao_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ssao_pipeline_layout"),
-                bind_group_layouts: &[&ssao_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let ssao_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssao_pipeline_layout"),
+            bind_group_layouts: &[&ssao_bind_group_layout],
+            push_constant_ranges: &[],
+        });
         let ssao_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ssao_pipeline"),
             layout: Some(&ssao_pipeline_layout),
@@ -720,32 +730,31 @@ impl GpuRenderer {
                 bind_group_layouts: &[&downsample_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        let downsample_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("downsample_pipeline"),
-                layout: Some(&downsample_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_fullscreen"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_downsample"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
+        let downsample_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("downsample_pipeline"),
+            layout: Some(&downsample_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_downsample"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         let postprocess_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -779,32 +788,31 @@ impl GpuRenderer {
                 bind_group_layouts: &[&postprocess_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        let postprocess_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("postprocess_pipeline"),
-                layout: Some(&postprocess_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_fullscreen"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_postprocess"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
+        let postprocess_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("postprocess_pipeline"),
+            layout: Some(&postprocess_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_postprocess"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         let postprocess_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("postprocess_uniforms"),
             size: std::mem::size_of::<PostprocessUniforms>() as u64,
@@ -899,23 +907,27 @@ impl GpuRenderer {
 
         self.cached_frames.clear();
         for pixels in frames {
-            let tex = Texture { pixels, width, height };
+            let tex = Texture {
+                pixels,
+                width,
+                height,
+            };
             let (vertices, indices) = extruded_billboard_geometry(&tex, 0.1, true);
 
-            let vertex_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("frame_vertices"),
-                        contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            let index_buffer =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("frame_indices"),
-                        contents: bytemuck::cast_slice(&indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+            let vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("frame_vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("frame_indices"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
             let num_indices = indices.len() as u32;
 
             let mut rgba_data = Vec::with_capacity(pixels.len() * 4);
@@ -962,13 +974,13 @@ impl GpuRenderer {
                 edge[2] as f32 / 255.0,
                 1.0,
             ];
-            let edge_buf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("frame_edge_color"),
-                        contents: bytemuck::bytes_of(&edge_data),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
+            let edge_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("frame_edge_color"),
+                    contents: bytemuck::bytes_of(&edge_data),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
 
             let tex_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("frame_tex_bg"),
@@ -1019,7 +1031,8 @@ impl GpuRenderer {
             supersample: true,
             ..SceneParams::default()
         };
-        let fb = self.readback_offscreen_animated(frame_idx, tex_w, tex_h, px_w, px_h, tick, &params);
+        let fb =
+            self.readback_offscreen_animated(frame_idx, tex_w, tex_h, px_w, px_h, tick, &params);
         fb_to_lines(&fb, px_w, px_h, height)
     }
 
@@ -1046,7 +1059,10 @@ impl GpuRenderer {
         self.ensure_render_target(px_w, px_h, params.supersample);
 
         let tex_aspect = tex_w as f32 / tex_h as f32;
-        if self.render_scene(tex_aspect, px_w, px_h, tick, params).is_err() {
+        if self
+            .render_scene(tex_aspect, px_w, px_h, tick, params)
+            .is_err()
+        {
             self.active_frame_idx = None;
             return vec![];
         }
@@ -1081,7 +1097,10 @@ impl GpuRenderer {
             return vec![];
         }
 
-        if self.render_to_offscreen_params(texture, px_w, px_h, tick, params).is_err() {
+        if self
+            .render_to_offscreen_params(texture, px_w, px_h, tick, params)
+            .is_err()
+        {
             return vec![];
         }
 
@@ -1175,7 +1194,9 @@ impl GpuRenderer {
         let tex_aspect = texture.width as f32 / texture.height as f32;
         self.ensure_texture(texture);
 
-        let scale = params.render_scale.unwrap_or(if params.supersample { 2.0 } else { 1.0 });
+        let scale = params
+            .render_scale
+            .unwrap_or(if params.supersample { 2.0 } else { 1.0 });
         let scaled_w = ((px_w as f32 * scale) as u32).max(1);
         let scaled_h = ((px_h as f32 * scale) as u32).max(1);
         self.ensure_render_target_scaled(px_w, px_h, scaled_w, scaled_h);
@@ -1195,7 +1216,6 @@ impl GpuRenderer {
         tick: u64,
         params: &SceneParams,
     ) -> Result<()> {
-
         let vp_aspect = px_w as f32 / px_h as f32;
         let fill = params.fill.unwrap_or(0.65);
 
@@ -1206,9 +1226,9 @@ impl GpuRenderer {
             (phase - 0.6 * phase.sin()) as f32
         });
         let pitch = params.camera_pitch.unwrap_or(0.26);
-        let bob = params.bob.unwrap_or_else(|| {
-            (tick as f64 * 0.035).sin() as f32 * 0.06
-        });
+        let bob = params
+            .bob
+            .unwrap_or_else(|| (tick as f64 * 0.035).sin() as f32 * 0.06);
 
         let light_az = params.light_azimuth.unwrap_or(0.8);
         let light_el = params.light_elevation.unwrap_or(0.96);
@@ -1246,32 +1266,25 @@ impl GpuRenderer {
                 proj[3][1] += jy * 2.0 / sh as f32;
             }
         }
-        let view = mat4_mul(
-            &mat4_translate(0.0, 0.0, -cam_dist),
-            &mat4_rotate_x(pitch),
-        );
+        let view = mat4_mul(&mat4_translate(0.0, 0.0, -cam_dist), &mat4_rotate_x(pitch));
         let view_proj = mat4_mul(&proj, &view);
 
         let model_rot = mat4_rotate_y(spin);
         let model = mat4_mul(&mat4_translate(0.0, bob, 0.0), &model_rot);
         let mvp = mat4_mul(&view_proj, &model);
 
-        let shadow_model = mat4_mul(
-            &mat4_shadow_projection(light_pos, ground_y),
-            &model,
-        );
+        let shadow_model = mat4_mul(&mat4_shadow_projection(light_pos, ground_y), &model);
         let shadow_mvp = mat4_mul(&view_proj, &shadow_model);
 
         let ground_mvp = view_proj;
 
-        let bg = params.bg_color.unwrap_or([0x13 as f32 / 255.0, 0x0f as f32 / 255.0, 0x17 as f32 / 255.0]);
+        let bg = params.bg_color.unwrap_or([
+            0x13 as f32 / 255.0,
+            0x0f as f32 / 255.0,
+            0x17 as f32 / 255.0,
+        ]);
 
-        let camera_pos = [
-            0.0,
-            cam_dist * pitch.sin(),
-            cam_dist * pitch.cos(),
-            1.0,
-        ];
+        let camera_pos = [0.0, cam_dist * pitch.sin(), cam_dist * pitch.cos(), 1.0];
 
         let uniforms = Uniforms {
             mvp,
@@ -1343,13 +1356,22 @@ impl GpuRenderer {
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.draw(0..6, 0..1);
 
-            let (vb, ib, n_idx, tex_bg) =
-                if let Some(fi) = self.active_frame_idx {
-                    let f = &self.cached_frames[fi];
-                    (&f.vertex_buffer, &f.index_buffer, f.num_indices, &f.tex_bind_group)
-                } else {
-                    (&self.vertex_buffer, &self.index_buffer, self.num_indices, &self.tex_state.as_ref().unwrap().bind_group)
-                };
+            let (vb, ib, n_idx, tex_bg) = if let Some(fi) = self.active_frame_idx {
+                let f = &self.cached_frames[fi];
+                (
+                    &f.vertex_buffer,
+                    &f.index_buffer,
+                    f.num_indices,
+                    &f.tex_bind_group,
+                )
+            } else {
+                (
+                    &self.vertex_buffer,
+                    &self.index_buffer,
+                    self.num_indices,
+                    &self.tex_state.as_ref().unwrap().bind_group,
+                )
+            };
 
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
@@ -1373,13 +1395,7 @@ impl GpuRenderer {
 
         let scene_w = rt.scene_width as f32;
         let scene_h = rt.scene_height as f32;
-        let (bbox_min, bbox_max) = screen_aabb_from_mvp(
-            &mvp,
-            billboard_h,
-            0.1,
-            scene_w,
-            scene_h,
-        );
+        let (bbox_min, bbox_max) = screen_aabb_from_mvp(&mvp, billboard_h, 0.1, scene_w, scene_h);
         let ref_height = 720.0f32;
         let res_scale = scene_h / ref_height;
         let ssao_uniforms = SsaoUniforms {
@@ -1417,7 +1433,9 @@ impl GpuRenderer {
             pass.draw(0..3, 0..1);
         }
 
-        if let (Some(ds_view), Some(ds_bg)) = (&rt.downsample_output_view, &rt.downsample_bind_group) {
+        if let (Some(ds_view), Some(ds_bg)) =
+            (&rt.downsample_output_view, &rt.downsample_bind_group)
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("downsample_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1476,7 +1494,9 @@ impl GpuRenderer {
     }
 
     pub fn offscreen_view(&self) -> Option<&wgpu::TextureView> {
-        self.render_target.as_ref().map(|rt| &rt.postprocess_output_view)
+        self.render_target
+            .as_ref()
+            .map(|rt| &rt.postprocess_output_view)
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -1560,11 +1580,9 @@ impl GpuRenderer {
 
     fn ensure_texture(&mut self, texture: &Texture) {
         let data_ptr = texture.pixels.as_ptr() as usize;
-        if self
-            .tex_state
-            .as_ref()
-            .is_some_and(|ts| ts.data_ptr == data_ptr && ts.tex_w == texture.width && ts.tex_h == texture.height)
-        {
+        if self.tex_state.as_ref().is_some_and(|ts| {
+            ts.data_ptr == data_ptr && ts.tex_w == texture.width && ts.tex_h == texture.height
+        }) {
             return;
         }
 
@@ -1680,7 +1698,13 @@ impl GpuRenderer {
         self.ensure_render_target_scaled(width, height, scene_w, scene_h);
     }
 
-    pub fn ensure_render_target_scaled(&mut self, width: u32, height: u32, scene_w: u32, scene_h: u32) {
+    pub fn ensure_render_target_scaled(
+        &mut self,
+        width: u32,
+        height: u32,
+        scene_w: u32,
+        scene_h: u32,
+    ) {
         let needs_update = match &self.render_target {
             Some(rt) => {
                 rt.output_width != width
@@ -1705,8 +1729,7 @@ impl GpuRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1722,8 +1745,7 @@ impl GpuRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let ssao_output_view =
@@ -1844,21 +1866,20 @@ impl GpuRenderer {
         let postprocess_output_view =
             postprocess_output_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let postprocess_bind_group =
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("postprocess_bg"),
-                layout: &self.postprocess_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.postprocess_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(pp_input_view),
-                    },
-                ],
-            });
+        let postprocess_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("postprocess_bg"),
+            layout: &self.postprocess_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.postprocess_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(pp_input_view),
+                },
+            ],
+        });
 
         let row_bytes = width * 4;
         let padded_row_bytes = (row_bytes + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
@@ -2106,12 +2127,7 @@ fn extruded_billboard_geometry(
         // Build UV and position arrays from flat coords
         // contour crate outputs coordinates in [0, 1] UV space (due to x_step/y_step)
         let uv_points: Vec<[f32; 2]> = (0..n_verts)
-            .map(|i| {
-                [
-                    flat_coords[i * 2] as f32,
-                    flat_coords[i * 2 + 1] as f32,
-                ]
-            })
+            .map(|i| [flat_coords[i * 2] as f32, flat_coords[i * 2 + 1] as f32])
             .collect();
 
         let pos_points: Vec<[f32; 2]> = uv_points
@@ -2320,10 +2336,22 @@ mod tests {
     fn geometry_trims_to_opaque_content() {
         let texture = padded_texture();
         let (vertices, _) = extruded_billboard_geometry(&texture, 0.1, true);
-        let min_x = vertices.iter().map(|v| v.position[0]).fold(f32::INFINITY, f32::min);
-        let max_x = vertices.iter().map(|v| v.position[0]).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = vertices.iter().map(|v| v.position[1]).fold(f32::INFINITY, f32::min);
-        let max_y = vertices.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
+        let min_x = vertices
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = vertices
+            .iter()
+            .map(|v| v.position[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
 
         assert!(
             min_x > -0.7 && max_x < 0.7,
@@ -2351,11 +2379,17 @@ mod tests {
         let back = count(1);
         let sides = count(2);
 
-        eprintln!("front: {front}, back: {back}, sides: {sides}, total: {}", indices.len() / 3);
+        eprintln!(
+            "front: {front}, back: {back}, sides: {sides}, total: {}",
+            indices.len() / 3
+        );
         assert!(front > 0, "must have front cap triangles");
         assert!(back > 0, "must have back cap triangles");
         assert!(sides > 0, "must have side wall triangles");
-        assert_eq!(front, back, "front and back should have equal triangle count");
+        assert_eq!(
+            front, back,
+            "front and back should have equal triangle count"
+        );
     }
 
     #[test]
@@ -2365,8 +2399,14 @@ mod tests {
         let front_verts: Vec<_> = vertices.iter().filter(|v| v.face_type == 0).collect();
         assert!(!front_verts.is_empty());
 
-        let min_u = front_verts.iter().map(|v| v.uv[0]).fold(f32::INFINITY, f32::min);
-        let max_u = front_verts.iter().map(|v| v.uv[0]).fold(f32::NEG_INFINITY, f32::max);
+        let min_u = front_verts
+            .iter()
+            .map(|v| v.uv[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_u = front_verts
+            .iter()
+            .map(|v| v.uv[0])
+            .fold(f32::NEG_INFINITY, f32::max);
 
         assert!(
             min_u > 0.1 && max_u < 0.9,
@@ -2387,7 +2427,11 @@ mod tests {
             }
         }
         let leaked = Box::leak(pixels.into_boxed_slice());
-        let texture = Texture { pixels: leaked, width: 32, height: 32 };
+        let texture = Texture {
+            pixels: leaked,
+            width: 32,
+            height: 32,
+        };
         let (vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
         assert!(!indices.is_empty());
 
@@ -2395,24 +2439,41 @@ mod tests {
             .iter()
             .filter(|v| v.face_type == 2)
             .any(|v| v.normal[0].abs() > 0.01 && v.normal[1].abs() > 0.01);
-        assert!(has_diagonal, "circle should have diagonal side-wall normals");
+        assert!(
+            has_diagonal,
+            "circle should have diagonal side-wall normals"
+        );
     }
 
     #[test]
     fn fully_opaque_falls_back_to_rect() {
         let pixels = vec![[255, 0, 0, 255]; 16 * 16];
         let leaked = Box::leak(pixels.into_boxed_slice());
-        let texture = Texture { pixels: leaked, width: 16, height: 16 };
+        let texture = Texture {
+            pixels: leaked,
+            width: 16,
+            height: 16,
+        };
         let (_vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
-        assert!(!indices.is_empty(), "fully opaque should produce rect fallback geometry");
+        assert!(
+            !indices.is_empty(),
+            "fully opaque should produce rect fallback geometry"
+        );
     }
 
     #[test]
     fn fully_transparent_produces_empty_geometry() {
         let pixels = vec![[0, 0, 0, 0]; 16 * 16];
         let leaked = Box::leak(pixels.into_boxed_slice());
-        let texture = Texture { pixels: leaked, width: 16, height: 16 };
+        let texture = Texture {
+            pixels: leaked,
+            width: 16,
+            height: 16,
+        };
         let (vertices, indices) = extruded_billboard_geometry(&texture, 0.1, true);
-        assert!(vertices.is_empty() && indices.is_empty(), "fully transparent should produce no geometry");
+        assert!(
+            vertices.is_empty() && indices.is_empty(),
+            "fully transparent should produce no geometry"
+        );
     }
 }

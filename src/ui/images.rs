@@ -17,10 +17,7 @@ pub fn clear_images(writer: &mut impl Write) -> std::io::Result<()> {
 }
 
 /// Render all visible image placements using the kitty graphics protocol.
-pub fn render_visible_images(
-    writer: &mut impl Write,
-    state: &AppState,
-) -> std::io::Result<()> {
+pub fn render_visible_images(writer: &mut impl Write, state: &AppState) -> std::io::Result<()> {
     let has_messages = state.messages_render_info.is_some() && !state.image_placements.is_empty();
     let has_thread = state.thread_render_info.is_some() && !state.thread_placements.is_empty();
     let has_inline = !state.inline_emoji_placements.is_empty();
@@ -32,11 +29,27 @@ pub fn render_visible_images(
     write!(writer, "\x1b[s")?;
 
     if let Some(info) = &state.messages_render_info {
-        render_placements(writer, &state.image_placements, info.inner_x, info.inner_y, info.inner_height, info.scroll_y, state)?;
+        render_placements(
+            writer,
+            &state.image_placements,
+            info.inner_x,
+            info.inner_y,
+            info.inner_height,
+            info.scroll_y,
+            state,
+        )?;
     }
 
     if let Some(info) = &state.thread_render_info {
-        render_placements(writer, &state.thread_placements, info.inner_x, info.inner_y, info.inner_height, info.scroll_y, state)?;
+        render_placements(
+            writer,
+            &state.thread_placements,
+            info.inner_x,
+            info.inner_y,
+            info.inner_height,
+            info.scroll_y,
+            state,
+        )?;
     }
 
     render_inline_emoji(writer, state)?;
@@ -46,12 +59,15 @@ pub fn render_visible_images(
     Ok(())
 }
 
-fn render_inline_emoji(
-    writer: &mut impl Write,
-    state: &AppState,
-) -> std::io::Result<()> {
+fn render_inline_emoji(writer: &mut impl Write, state: &AppState) -> std::io::Result<()> {
     for p in &state.inline_emoji_placements {
-        if is_occluded(p.screen_row, p.screen_col, p.display_rows, p.display_cols, &state.occlusion_rects) {
+        if is_occluded(
+            p.screen_row,
+            p.screen_col,
+            p.display_rows,
+            p.display_cols,
+            &state.occlusion_rects,
+        ) {
             continue;
         }
         let cached = if let Some(uid) = p.emoji_key.strip_prefix("avatar:") {
@@ -97,15 +113,25 @@ fn render_placements(
             continue;
         }
 
-        let cached = match state.image_cache.get(&placement.url)
+        let cached = match state
+            .image_cache
+            .get(&placement.url)
             .or_else(|| state.custom_emoji_images.get(&placement.url))
         {
             Some(c) => c,
             None => continue,
         };
 
-        let top_crop_rows = if line < scroll_y { (scroll_y - line) as u16 } else { 0 };
-        let offset_in_view = if line >= scroll_y { (line - scroll_y) as u16 } else { 0 };
+        let top_crop_rows = if line < scroll_y {
+            (scroll_y - line) as u16
+        } else {
+            0
+        };
+        let offset_in_view = if line >= scroll_y {
+            (line - scroll_y) as u16
+        } else {
+            0
+        };
         let screen_row = inner_y + offset_in_view;
         let screen_col = inner_x + placement.col;
 
@@ -116,7 +142,13 @@ fn render_placements(
             continue;
         }
 
-        if is_occluded(screen_row, screen_col, visible_rows, placement.display_cols, &state.occlusion_rects) {
+        if is_occluded(
+            screen_row,
+            screen_col,
+            visible_rows,
+            placement.display_cols,
+            &state.occlusion_rects,
+        ) {
             continue;
         }
 
@@ -153,11 +185,7 @@ struct VerticalCrop {
 
 fn is_occluded(row: u16, col: u16, rows: u16, cols: u16, rects: &[Rect]) -> bool {
     for r in rects {
-        if col < r.x + r.width
-            && col + cols > r.x
-            && row < r.y + r.height
-            && row + rows > r.y
-        {
+        if col < r.x + r.width && col + cols > r.x && row < r.y + r.height && row + rows > r.y {
             return true;
         }
     }
@@ -230,7 +258,9 @@ fn crop_image_vertical(png_data: &[u8], crop: &VerticalCrop) -> Option<Vec<u8>> 
     let cropped = img.crop_imm(0, y_start, w, y_height);
     let mut buf = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buf);
-    cropped.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
+    cropped
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .ok()?;
     Some(buf)
 }
 

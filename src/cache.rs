@@ -40,14 +40,21 @@ impl DiskCache {
         let data = std::fs::read(&path).ok()?;
         let cache: Self = serde_json::from_slice(&data).ok()?;
         if cache.version != CACHE_VERSION {
-            warn!("Cache version mismatch (got {}, want {}), invalidating", cache.version, CACHE_VERSION);
+            warn!(
+                "Cache version mismatch (got {}, want {}), invalidating",
+                cache.version, CACHE_VERSION
+            );
             let _ = std::fs::remove_file(&path);
             return None;
         }
         if cache.team_id != team_id {
             return None;
         }
-        info!("Loaded cache: {} channels, {} users", cache.channels.len(), cache.users.len());
+        info!(
+            "Loaded cache: {} channels, {} users",
+            cache.channels.len(),
+            cache.users.len()
+        );
         Some(cache)
     }
 
@@ -69,10 +76,7 @@ impl DiskCache {
 
 fn cache_path(team_id: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(format!(
-        "{}/.cache/slackslack/{}/cache.json",
-        home, team_id
-    ))
+    PathBuf::from(format!("{}/.cache/slackslack/{}/cache.json", home, team_id))
 }
 
 // --- Standard emoji cache (team-independent) ---

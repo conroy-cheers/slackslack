@@ -30,7 +30,7 @@ pub fn extract_token(leveldb_dir: &Path) -> Result<String> {
         extract_tokens_from_bytes(&data, &mut tokens);
     }
 
-    tokens.sort_by(|a, b| b.len().cmp(&a.len()));
+    tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
     tokens.dedup();
 
     match tokens.into_iter().next() {
@@ -54,10 +54,10 @@ fn extract_tokens_from_bytes(data: &[u8], tokens: &mut Vec<String>) {
             }
             let candidate = &data[start..end];
             // Valid tokens are at least ~60 chars
-            if candidate.len() >= 50 {
-                if let Ok(s) = std::str::from_utf8(candidate) {
-                    tokens.push(s.to_string());
-                }
+            if candidate.len() >= 50
+                && let Ok(s) = std::str::from_utf8(candidate)
+            {
+                tokens.push(s.to_string());
             }
             i = end;
         } else {
@@ -72,7 +72,7 @@ fn is_token_char(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tokens_from_bytes, extract_token};
+    use super::{extract_token, extract_tokens_from_bytes};
 
     #[test]
     fn finds_longest_token_in_binary_blob() {
@@ -88,10 +88,7 @@ mod tests {
 
     #[test]
     fn extract_token_reads_leveldb_like_files() {
-        let base = std::env::temp_dir().join(format!(
-            "libslack-token-test-{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("libslack-token-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(

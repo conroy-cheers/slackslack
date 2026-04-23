@@ -1,6 +1,6 @@
 use crate::cache::{DiskCache, load_standard_emoji_cache};
-use crate::event::handler::{HandleResult, handle_event};
 use crate::event::Event;
+use crate::event::handler::{HandleResult, handle_event};
 use crate::slack::client::SlackApi;
 use crate::slack::realtime::RealtimeEvent;
 use crate::state::AppState;
@@ -37,18 +37,27 @@ impl<C: SlackApi> App<C> {
             }
             if !cache.custom_emoji.is_empty() {
                 state.custom_emoji = cache.custom_emoji;
-                info!("Restored {} custom emoji from cache", state.custom_emoji.len());
+                info!(
+                    "Restored {} custom emoji from cache",
+                    state.custom_emoji.len()
+                );
             }
             if !cache.channel_sections.is_empty() {
                 state.channel_sections = cache.channel_sections;
-                info!("Restored {} channel sections from cache", state.channel_sections.len());
+                info!(
+                    "Restored {} channel sections from cache",
+                    state.channel_sections.len()
+                );
             }
             state.dirty = true;
         }
 
         if let Some(standard) = load_standard_emoji_cache() {
             state.standard_emoji = standard;
-            info!("Restored {} standard emoji from cache", state.standard_emoji.len());
+            info!(
+                "Restored {} standard emoji from cache",
+                state.standard_emoji.len()
+            );
         }
 
         Self {
@@ -180,10 +189,7 @@ impl<C: SlackApi> App<C> {
         Ok(())
     }
 
-    fn render_frame(
-        state: &mut AppState,
-        terminal: &mut ratatui::DefaultTerminal,
-    ) -> Result<()> {
+    fn render_frame(state: &mut AppState, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         if !state.dirty {
             return Ok(());
         }

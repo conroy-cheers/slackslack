@@ -11,7 +11,10 @@ pub enum Event {
     Mouse(crossterm::event::MouseEvent),
 
     // Slack real-time
-    SlackConnected { self_id: String, team: String },
+    SlackConnected {
+        self_id: String,
+        team: String,
+    },
     SlackDisconnected,
     SlackWsEvent(WsEvent),
 

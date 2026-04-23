@@ -39,10 +39,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     // Main area: sidebar | content
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(sidebar_width),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
         .split(outer[0]);
 
     // Content area: optional search bar, messages (+thread), input
@@ -58,12 +55,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         vec![
             Constraint::Length(1),            // search bar
             Constraint::Min(0),               // messages (+thread)
-            Constraint::Length(input_height),  // input
+            Constraint::Length(input_height), // input
         ]
     } else {
         vec![
             Constraint::Min(0),               // messages (+thread)
-            Constraint::Length(input_height),  // input
+            Constraint::Length(input_height), // input
         ]
     };
     let content_chunks = Layout::default()
@@ -73,7 +70,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     // Determine chunk indices depending on whether search bar is present
     let (search_bar_area, messages_area, input_area) = if has_search_bar {
-        (Some(content_chunks[0]), content_chunks[1], content_chunks[2])
+        (
+            Some(content_chunks[0]),
+            content_chunks[1],
+            content_chunks[2],
+        )
     } else {
         (None, content_chunks[0], content_chunks[1])
     };
@@ -88,10 +89,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     if thread_open {
         let msg_thread_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(55),
-                Constraint::Percentage(45),
-            ])
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(messages_area);
 
         state.messages_area = msg_thread_chunks[0];
@@ -117,7 +115,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     match state.input_mode {
         InputMode::Insert => {
             let inner_width = input_area.width.saturating_sub(2);
-            let (cx, cy) = input::cursor_display_position(&state.input_text, state.input_cursor, inner_width);
+            let (cx, cy) =
+                input::cursor_display_position(&state.input_text, state.input_cursor, inner_width);
             let x = input_area.x + 1 + cx;
             let y = input_area.y + 1 + cy.saturating_sub(state.input_scroll);
             frame.set_cursor_position((x, y));
@@ -146,7 +145,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             let y = input_area.y + 1;
             frame.set_cursor_position((x, y));
         }
-        InputMode::Normal | InputMode::EmojiPicker | InputMode::UserPicker | InputMode::GlobalSearch | InputMode::EmojiPreview => {}
+        InputMode::Normal
+        | InputMode::EmojiPicker
+        | InputMode::UserPicker
+        | InputMode::GlobalSearch
+        | InputMode::EmojiPreview => {}
     }
 
     // Help overlay (rendered last so it's on top)
@@ -158,32 +161,42 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     // Emoji picker overlay (on top of everything)
     if state.input_mode == InputMode::EmojiPicker {
         emoji_picker::render(frame, state);
-        state.occlusion_rects.push(emoji_picker::overlay_rect(frame.area()));
+        state
+            .occlusion_rects
+            .push(emoji_picker::overlay_rect(frame.area()));
     }
 
     // User picker overlay (on top of everything)
     if state.input_mode == InputMode::UserPicker {
         user_picker::render(frame, state);
-        state.occlusion_rects.push(user_picker::overlay_rect(frame.area()));
+        state
+            .occlusion_rects
+            .push(user_picker::overlay_rect(frame.area()));
     }
 
     // Global search overlay
     if state.input_mode == InputMode::GlobalSearch {
         global_search::render(frame, state);
-        state.occlusion_rects.push(global_search::overlay_rect(frame.area()));
+        state
+            .occlusion_rects
+            .push(global_search::overlay_rect(frame.area()));
     }
 
     // Message context menu
     if state.show_context_menu {
         let msg_area = state.messages_area;
         context_menu::render(frame, state, msg_area);
-        state.occlusion_rects.push(context_menu::overlay_rect(state, msg_area));
+        state
+            .occlusion_rects
+            .push(context_menu::overlay_rect(state, msg_area));
     }
 
     // 3D emoji preview (on top of everything)
     if state.input_mode == InputMode::EmojiPreview {
         emoji_preview::render(frame, state);
-        state.occlusion_rects.push(emoji_preview::overlay_rect(frame.area()));
+        state
+            .occlusion_rects
+            .push(emoji_preview::overlay_rect(frame.area()));
     }
 }
 
@@ -194,11 +207,7 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     let count = state.message_search_results.len();
     let suffix = if state.input_mode == InputMode::MessageSearch {
         if count > 0 {
-            format!(
-                " [{}/{}]",
-                state.message_search_idx + 1,
-                count
-            )
+            format!(" [{}/{}]", state.message_search_idx + 1, count)
         } else if !state.message_search_query.is_empty() {
             " [no matches]".to_string()
         } else {
@@ -215,7 +224,12 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     };
 
     let line = vec![
-        Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             state.message_search_query.clone(),
             Style::default().fg(Color::White),
@@ -223,7 +237,7 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(suffix, Style::default().fg(Color::DarkGray)),
     ];
 
-    let paragraph = Paragraph::new(ratatui::text::Line::from(line))
-        .style(Style::default().bg(Color::DarkGray));
+    let paragraph =
+        Paragraph::new(ratatui::text::Line::from(line)).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }

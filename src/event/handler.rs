@@ -171,7 +171,12 @@ pub fn handle_event<C: SlackApi>(
             state.dirty = true;
             HandleResult::Continue
         }
-        Event::EmojiPreviewImageLoaded { frames, frame_delays, width, height } => {
+        Event::EmojiPreviewImageLoaded {
+            frames,
+            frame_delays,
+            width,
+            height,
+        } => {
             state.emoji_preview_pending = false;
             state.emoji_preview_tick = 0;
             state.emoji_preview_frames = frames;
@@ -294,7 +299,10 @@ fn handle_normal_channels<C: SlackApi>(
             let len = state.channel_list_items.len();
             if len > 0 {
                 state.selected_visual_idx = (state.selected_visual_idx + 15).min(len - 1);
-                if matches!(state.channel_list_items.get(state.selected_visual_idx), Some(ChannelListEntry::Spacer)) {
+                if matches!(
+                    state.channel_list_items.get(state.selected_visual_idx),
+                    Some(ChannelListEntry::Spacer)
+                ) {
                     state.selected_visual_idx = (state.selected_visual_idx + 1).min(len - 1);
                 }
                 state.sync_selected_channel_from_visual();
@@ -302,7 +310,10 @@ fn handle_normal_channels<C: SlackApi>(
         }
         KeyCode::PageUp => {
             state.selected_visual_idx = state.selected_visual_idx.saturating_sub(15);
-            if matches!(state.channel_list_items.get(state.selected_visual_idx), Some(ChannelListEntry::Spacer)) {
+            if matches!(
+                state.channel_list_items.get(state.selected_visual_idx),
+                Some(ChannelListEntry::Spacer)
+            ) {
                 state.selected_visual_idx = state.selected_visual_idx.saturating_sub(1);
             }
             state.sync_selected_channel_from_visual();
@@ -370,12 +381,20 @@ fn handle_normal_messages<C: SlackApi>(
         match key.code {
             KeyCode::Char('d') | KeyCode::Char('f') => {
                 // Half/full page down (newer messages)
-                let page = if key.code == KeyCode::Char('f') { 15 } else { 8 };
+                let page = if key.code == KeyCode::Char('f') {
+                    15
+                } else {
+                    8
+                };
                 state.message_select_page(page);
             }
             KeyCode::Char('u') | KeyCode::Char('b') => {
                 // Half/full page up (older messages)
-                let page = if key.code == KeyCode::Char('b') { 15 } else { 8 };
+                let page = if key.code == KeyCode::Char('b') {
+                    15
+                } else {
+                    8
+                };
                 state.message_select_page(-page);
                 maybe_load_older(state, client, event_tx);
             }
@@ -727,13 +746,7 @@ fn handle_insert_key<C: SlackApi>(
                 };
 
                 if let Some(channel_id) = state.active_channel_id() {
-                    spawn_send_message(
-                        client,
-                        &channel_id,
-                        &text,
-                        thread_ts.as_deref(),
-                        event_tx,
-                    );
+                    spawn_send_message(client, &channel_id, &text, thread_ts.as_deref(), event_tx);
                     state.save_input_to_history();
                 }
             }
@@ -968,16 +981,26 @@ fn handle_emoji_picker_key<C: SlackApi>(
             {
                 match state.emoji_picker_source {
                     crate::state::EmojiPickerSource::Reaction => {
-                        let should_remove = state.emoji_picker_message_reactions
+                        let should_remove = state
+                            .emoji_picker_message_reactions
                             .iter()
                             .any(|(n, user_reacted)| n == &name && *user_reacted);
                         if state.focus == Focus::Thread {
                             if let (Some(channel_id), Some(ts)) = (
-                                state.thread_parent_ts.clone().and_then(|_| state.thread_channel_id.clone()),
+                                state
+                                    .thread_parent_ts
+                                    .clone()
+                                    .and_then(|_| state.thread_channel_id.clone()),
                                 state.thread_parent_ts.clone(),
                             ) {
                                 if should_remove {
-                                    spawn_remove_reaction(client, &channel_id, &ts, &name, event_tx);
+                                    spawn_remove_reaction(
+                                        client,
+                                        &channel_id,
+                                        &ts,
+                                        &name,
+                                        event_tx,
+                                    );
                                 } else {
                                     spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
                                 }
@@ -986,7 +1009,13 @@ fn handle_emoji_picker_key<C: SlackApi>(
                             let ts = msg.ts.clone();
                             if let Some(channel_id) = state.active_channel_id() {
                                 if should_remove {
-                                    spawn_remove_reaction(client, &channel_id, &ts, &name, event_tx);
+                                    spawn_remove_reaction(
+                                        client,
+                                        &channel_id,
+                                        &ts,
+                                        &name,
+                                        event_tx,
+                                    );
                                 } else {
                                     spawn_add_reaction(client, &channel_id, &ts, &name, event_tx);
                                 }
@@ -998,12 +1027,22 @@ fn handle_emoji_picker_key<C: SlackApi>(
                         if let Some(colon_pos) = inline {
                             // Replace `:query` with `:name:` in input text
                             let remove_len = 1 + state.emoji_picker_query.chars().count(); // ':' + query
-                            let start_byte: usize = state.input_text.char_indices()
-                                .nth(colon_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
-                            let end_byte: usize = state.input_text.char_indices()
-                                .nth(colon_pos + remove_len).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                            let start_byte: usize = state
+                                .input_text
+                                .char_indices()
+                                .nth(colon_pos)
+                                .map(|(b, _)| b)
+                                .unwrap_or(state.input_text.len());
+                            let end_byte: usize = state
+                                .input_text
+                                .char_indices()
+                                .nth(colon_pos + remove_len)
+                                .map(|(b, _)| b)
+                                .unwrap_or(state.input_text.len());
                             let insert = format!(":{}:", name);
-                            state.input_text.replace_range(start_byte..end_byte, &insert);
+                            state
+                                .input_text
+                                .replace_range(start_byte..end_byte, &insert);
                             state.input_cursor = colon_pos + insert.chars().count();
                             state.emoji_picker_inline_colon_pos = None;
                         } else {
@@ -1030,8 +1069,12 @@ fn handle_emoji_picker_key<C: SlackApi>(
             if inline.is_some() && state.emoji_picker_query.is_empty() {
                 // Remove the ':' from input and close picker
                 let colon_pos = inline.unwrap();
-                let byte_pos: usize = state.input_text.char_indices()
-                    .nth(colon_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                let byte_pos: usize = state
+                    .input_text
+                    .char_indices()
+                    .nth(colon_pos)
+                    .map(|(b, _)| b)
+                    .unwrap_or(state.input_text.len());
                 if byte_pos < state.input_text.len() {
                     state.input_text.remove(byte_pos);
                 }
@@ -1046,8 +1089,12 @@ fn handle_emoji_picker_key<C: SlackApi>(
                 state.emoji_picker_query.pop();
                 let query_len = state.emoji_picker_query.chars().count();
                 let char_pos = colon_pos + 1 + query_len;
-                let byte_pos: usize = state.input_text.char_indices()
-                    .nth(char_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                let byte_pos: usize = state
+                    .input_text
+                    .char_indices()
+                    .nth(char_pos)
+                    .map(|(b, _)| b)
+                    .unwrap_or(state.input_text.len());
                 if byte_pos < state.input_text.len() {
                     state.input_text.remove(byte_pos);
                 }
@@ -1057,13 +1104,17 @@ fn handle_emoji_picker_key<C: SlackApi>(
             }
             state.filter_emoji_picker();
         }
-        KeyCode::Char('j') | KeyCode::Down if inline.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('j') | KeyCode::Down
+            if inline.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             if !state.emoji_picker_results.is_empty() {
                 state.emoji_picker_selected =
                     (state.emoji_picker_selected + 1) % state.emoji_picker_results.len();
             }
         }
-        KeyCode::Char('k') | KeyCode::Up if inline.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('k') | KeyCode::Up
+            if inline.is_none() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             if !state.emoji_picker_results.is_empty() {
                 if state.emoji_picker_selected == 0 {
                     state.emoji_picker_selected = state.emoji_picker_results.len() - 1;
@@ -1090,8 +1141,8 @@ fn handle_emoji_picker_key<C: SlackApi>(
         KeyCode::PageDown => {
             let page = 15;
             if !state.emoji_picker_results.is_empty() {
-                state.emoji_picker_selected = (state.emoji_picker_selected + page)
-                    .min(state.emoji_picker_results.len() - 1);
+                state.emoji_picker_selected =
+                    (state.emoji_picker_selected + page).min(state.emoji_picker_results.len() - 1);
             }
         }
         KeyCode::PageUp => {
@@ -1114,7 +1165,11 @@ fn handle_emoji_picker_key<C: SlackApi>(
             }
         }
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some((name, display, is_custom)) = state.emoji_picker_results.get(state.emoji_picker_selected).cloned() {
+            if let Some((name, display, is_custom)) = state
+                .emoji_picker_results
+                .get(state.emoji_picker_selected)
+                .cloned()
+            {
                 state.emoji_preview_name = name.clone();
                 state.emoji_preview_char = display.clone();
                 state.emoji_preview_tick = 0;
@@ -1125,11 +1180,15 @@ fn handle_emoji_picker_key<C: SlackApi>(
                 state.emoji_preview_pending = false;
                 state.input_mode = InputMode::EmojiPreview;
 
-                if matches!(state.billboard_renderer, crate::ui::emoji_preview::BillboardRenderer::Cpu) {
+                if matches!(
+                    state.billboard_renderer,
+                    crate::ui::emoji_preview::BillboardRenderer::Cpu
+                ) {
                     match crate::ui::emoji_preview::gpu::GpuRenderer::try_new() {
                         Ok(gpu) => {
                             tracing::info!("GPU renderer initialized");
-                            state.billboard_renderer = crate::ui::emoji_preview::BillboardRenderer::Gpu(gpu);
+                            state.billboard_renderer =
+                                crate::ui::emoji_preview::BillboardRenderer::Gpu(gpu);
                         }
                         Err(e) => {
                             tracing::warn!("wgpu init failed, using CPU renderer: {}", e);
@@ -1140,7 +1199,9 @@ fn handle_emoji_picker_key<C: SlackApi>(
                 if is_custom {
                     if let Some(key) = state.resolve_emoji_key(&name) {
                         let has_cached = if let Some(cached) = state.custom_emoji_images.get(&key) {
-                            if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&cached.png_data) {
+                            if let Some((frames, delays, w, h)) =
+                                crate::ui::emoji_preview::decode_emoji_frames(&cached.png_data)
+                            {
                                 state.emoji_preview_frames = frames;
                                 state.emoji_preview_frame_delays = delays;
                                 state.emoji_preview_tex_w = w;
@@ -1162,7 +1223,8 @@ fn handle_emoji_picker_key<C: SlackApi>(
                         }
                     }
                 } else {
-                    let unified = display.chars()
+                    let unified = display
+                        .chars()
                         .filter(|&c| c != '\u{fe0f}')
                         .map(|c| format!("{:x}", c as u32))
                         .collect::<Vec<_>>()
@@ -1180,8 +1242,12 @@ fn handle_emoji_picker_key<C: SlackApi>(
             state.emoji_picker_query.push(c);
             if let Some(colon_pos) = inline {
                 let insert_char_pos = colon_pos + 1 + state.emoji_picker_query.chars().count() - 1;
-                let byte_pos: usize = state.input_text.char_indices()
-                    .nth(insert_char_pos).map(|(b, _)| b).unwrap_or(state.input_text.len());
+                let byte_pos: usize = state
+                    .input_text
+                    .char_indices()
+                    .nth(insert_char_pos)
+                    .map(|(b, _)| b)
+                    .unwrap_or(state.input_text.len());
                 state.input_text.insert(byte_pos, c);
                 state.input_cursor = insert_char_pos + 1;
             }
@@ -1194,10 +1260,7 @@ fn handle_emoji_picker_key<C: SlackApi>(
 
 // ── Emoji 3D preview ──────────────────────────────────────────────────────
 
-fn handle_emoji_preview_key(
-    key: crossterm::event::KeyEvent,
-    state: &mut AppState,
-) -> HandleResult {
+fn handle_emoji_preview_key(key: crossterm::event::KeyEvent, state: &mut AppState) -> HandleResult {
     state.dirty = true;
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
@@ -1210,10 +1273,7 @@ fn handle_emoji_preview_key(
 
 // ── User picker ────────────────────────────────────────────────────────────
 
-fn handle_user_picker_key(
-    key: crossterm::event::KeyEvent,
-    state: &mut AppState,
-) -> HandleResult {
+fn handle_user_picker_key(key: crossterm::event::KeyEvent, state: &mut AppState) -> HandleResult {
     state.dirty = true;
     match key.code {
         KeyCode::Esc => {
@@ -1267,8 +1327,8 @@ fn handle_user_picker_key(
         KeyCode::PageDown => {
             let page = 15;
             if !state.user_picker_results.is_empty() {
-                state.user_picker_selected = (state.user_picker_selected + page)
-                    .min(state.user_picker_results.len() - 1);
+                state.user_picker_selected =
+                    (state.user_picker_selected + page).min(state.user_picker_results.len() - 1);
             }
         }
         KeyCode::PageUp => {
@@ -1325,9 +1385,7 @@ fn handle_global_search_key<C: SlackApi>(
                         state.save_current_draft();
                         state.global_search_results.clear();
                         state.input_mode = InputMode::Normal;
-                        if let Some(idx) =
-                            state.channels.iter().position(|c| c.id == channel_id)
-                        {
+                        if let Some(idx) = state.channels.iter().position(|c| c.id == channel_id) {
                             state.selected_channel_idx = idx;
                             state.sync_visual_from_selected_channel();
                             state.close_thread();
@@ -1396,8 +1454,8 @@ fn handle_mouse_event<C: SlackApi>(
                 state.dirty = true;
             } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
                 let old = state.thread_scroll_offset;
-                state.thread_scroll_offset = (state.thread_scroll_offset + scroll_lines)
-                    .min(state.thread_max_scroll_offset);
+                state.thread_scroll_offset =
+                    (state.thread_scroll_offset + scroll_lines).min(state.thread_max_scroll_offset);
                 if state.thread_scroll_offset != old {
                     state.dirty = true;
                 }
@@ -1414,7 +1472,8 @@ fn handle_mouse_event<C: SlackApi>(
                 state.dirty = true;
             } else if state.thread_area.map_or(false, |r| contains(r, col, row)) {
                 let old = state.thread_scroll_offset;
-                state.thread_scroll_offset = state.thread_scroll_offset.saturating_sub(scroll_lines);
+                state.thread_scroll_offset =
+                    state.thread_scroll_offset.saturating_sub(scroll_lines);
                 if state.thread_scroll_offset != old {
                     state.dirty = true;
                 }
@@ -1524,10 +1583,7 @@ fn open_thread_for_selected<C: SlackApi>(
     event_tx: &mpsc::UnboundedSender<Event>,
 ) {
     if let Some(msg) = state.selected_message() {
-        let ts = msg
-            .thread_ts
-            .clone()
-            .unwrap_or_else(|| msg.ts.clone());
+        let ts = msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone());
         if let Some(channel_id) = state.active_channel_id() {
             spawn_load_thread(client, &channel_id, &ts, event_tx);
             state.open_thread(channel_id, ts);
@@ -1673,22 +1729,21 @@ fn handle_ws_message(ws_msg: WsMessage, state: &mut AppState) {
         && state.active_channel_id().as_deref() != Some(&channel_id);
 
     let notify_sender = if should_notify {
-        ws_msg.user.as_ref().map(|uid| state.user_display_name(uid).to_string())
+        ws_msg
+            .user
+            .as_ref()
+            .map(|uid| state.user_display_name(uid).to_string())
     } else {
         None
     };
     let notify_channel = if should_notify {
-        state
-            .channels
-            .iter()
-            .find(|c| c.id == channel_id)
-            .map(|c| {
-                if c.is_im {
-                    "DM".to_string()
-                } else {
-                    format!("#{}", c.display_name())
-                }
-            })
+        state.channels.iter().find(|c| c.id == channel_id).map(|c| {
+            if c.is_im {
+                "DM".to_string()
+            } else {
+                format!("#{}", c.display_name())
+            }
+        })
     } else {
         None
     };
@@ -1755,7 +1810,8 @@ fn maybe_load_older<C: SlackApi>(
 ) {
     if let Some(channel_id) = state.active_channel_id() {
         let near_top = if state.messages_scroll_override.is_some() {
-            state.messages_scroll_override
+            state
+                .messages_scroll_override
                 .map(|s| s + 20 >= state.max_scroll_offset && state.max_scroll_offset > 0)
                 .unwrap_or(false)
         } else {
@@ -1782,7 +1838,8 @@ fn mark_channel_read<C: SlackApi>(
     channel_id: &str,
 ) {
     let latest_ts = state
-        .channel_data.get(channel_id)
+        .channel_data
+        .get(channel_id)
         .and_then(|cd| cd.messages.back())
         .map(|m| m.ts.clone());
 
@@ -2041,7 +2098,8 @@ pub fn process_emoji_load_queue<C: SlackApi>(
 ) {
     let queue: Vec<String> = state.emoji_load_queue.drain(..).collect();
     for key in queue {
-        if state.custom_emoji_images.contains_key(&key) || state.pending_emoji_images.contains(&key) {
+        if state.custom_emoji_images.contains_key(&key) || state.pending_emoji_images.contains(&key)
+        {
             continue;
         }
         if let Some(img) = load_emoji_from_disk(&state.team_id, &key) {
@@ -2086,10 +2144,7 @@ pub fn process_avatar_load_queue<C: SlackApi>(
 
 fn avatar_cache_dir(team_id: &str) -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(format!(
-        "{}/.cache/slackslack/{}/avatars",
-        home, team_id
-    ))
+    std::path::PathBuf::from(format!("{}/.cache/slackslack/{}/avatars", home, team_id))
 }
 
 fn save_avatar_to_disk(team_id: &str, user_id: &str, png_data: &[u8]) {
@@ -2155,10 +2210,7 @@ fn spawn_download_avatar<C: SlackApi>(
 
 fn emoji_cache_dir(team_id: &str) -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(format!(
-        "{}/.cache/slackslack/{}/emoji",
-        home, team_id
-    ))
+    std::path::PathBuf::from(format!("{}/.cache/slackslack/{}/emoji", home, team_id))
 }
 
 fn save_emoji_to_disk(team_id: &str, name: &str, png_data: &[u8]) {
@@ -2279,7 +2331,9 @@ fn spawn_download_emoji_preview<C: SlackApi>(
         };
         match client.download_file(&url).await {
             Ok(data) => {
-                if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&data) {
+                if let Some((frames, delays, w, h)) =
+                    crate::ui::emoji_preview::decode_emoji_frames(&data)
+                {
                     let _ = tx.send(Event::EmojiPreviewImageLoaded {
                         frames,
                         frame_delays: delays,
@@ -2298,10 +2352,7 @@ fn spawn_download_emoji_preview<C: SlackApi>(
     });
 }
 
-fn spawn_download_emoji_preview_url(
-    url: &str,
-    event_tx: &mpsc::UnboundedSender<Event>,
-) {
+fn spawn_download_emoji_preview_url(url: &str, event_tx: &mpsc::UnboundedSender<Event>) {
     let url = url.to_string();
     let tx = event_tx.clone();
     tokio::spawn(async move {
@@ -2317,7 +2368,9 @@ fn spawn_download_emoji_preview_url(
         .await;
         match result {
             Ok(data) => {
-                if let Some((frames, delays, w, h)) = crate::ui::emoji_preview::decode_emoji_frames(&data) {
+                if let Some((frames, delays, w, h)) =
+                    crate::ui::emoji_preview::decode_emoji_frames(&data)
+                {
                     let _ = tx.send(Event::EmojiPreviewImageLoaded {
                         frames,
                         frame_delays: delays,
@@ -2484,12 +2537,16 @@ fn handle_file_path_key<C: SlackApi>(
         KeyCode::Backspace => {
             if state.file_path_cursor > 0 {
                 state.file_path_cursor -= 1;
-                let byte_pos: usize = state.file_path_input.char_indices()
+                let byte_pos: usize = state
+                    .file_path_input
+                    .char_indices()
                     .nth(state.file_path_cursor)
                     .map(|(i, _)| i)
                     .unwrap_or(state.file_path_input.len());
                 let ch = state.file_path_input[byte_pos..].chars().next().unwrap();
-                state.file_path_input.drain(byte_pos..byte_pos + ch.len_utf8());
+                state
+                    .file_path_input
+                    .drain(byte_pos..byte_pos + ch.len_utf8());
             }
         }
         KeyCode::Left => {
@@ -2506,7 +2563,9 @@ fn handle_file_path_key<C: SlackApi>(
         KeyCode::Home => state.file_path_cursor = 0,
         KeyCode::End => state.file_path_cursor = state.file_path_input.chars().count(),
         KeyCode::Char(c) => {
-            let byte_pos: usize = state.file_path_input.char_indices()
+            let byte_pos: usize = state
+                .file_path_input
+                .char_indices()
                 .nth(state.file_path_cursor)
                 .map(|(i, _)| i)
                 .unwrap_or(state.file_path_input.len());

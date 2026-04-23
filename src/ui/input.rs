@@ -77,7 +77,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 )
             }
         }
-        InputMode::EmojiPicker | InputMode::UserPicker | InputMode::MessageSearch | InputMode::Search | InputMode::GlobalSearch | InputMode::EmojiPreview => (
+        InputMode::EmojiPicker
+        | InputMode::UserPicker
+        | InputMode::MessageSearch
+        | InputMode::Search
+        | InputMode::GlobalSearch
+        | InputMode::EmojiPreview => (
             " i to type | / search | ? help ".to_string(),
             "",
             Style::default().fg(Color::DarkGray),
@@ -91,7 +96,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
             } else {
                 Style::default().fg(Color::DarkGray)
             },
-            if is_focused { Color::Cyan } else { Color::DarkGray },
+            if is_focused {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            },
         ),
     };
 
@@ -238,7 +247,11 @@ fn raw_to_display_cursor(raw: &str, raw_cursor: usize) -> usize {
     display_pos
 }
 
-fn resolve_mention_text(text: &str, base_style: Style, standard_emoji: &std::collections::HashMap<String, String>) -> Text<'static> {
+fn resolve_mention_text(
+    text: &str,
+    base_style: Style,
+    standard_emoji: &std::collections::HashMap<String, String>,
+) -> Text<'static> {
     let lines: Vec<Line<'static>> = text
         .split('\n')
         .map(|line_str| resolve_formatted_line(line_str, base_style, standard_emoji))
@@ -246,7 +259,11 @@ fn resolve_mention_text(text: &str, base_style: Style, standard_emoji: &std::col
     Text::from(lines)
 }
 
-fn resolve_formatted_line(text: &str, base_style: Style, standard_emoji: &std::collections::HashMap<String, String>) -> Line<'static> {
+fn resolve_formatted_line(
+    text: &str,
+    base_style: Style,
+    standard_emoji: &std::collections::HashMap<String, String>,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -283,10 +300,15 @@ fn resolve_formatted_line(text: &str, base_style: Style, standard_emoji: &std::c
 
         // Emoji shortcode: :name: — style recognized emoji
         if chars[i] == ':' && i + 1 < chars.len() {
-            if let Some((shortcode, _emoji_str)) = extract_emoji_shortcode(&chars, i, standard_emoji) {
+            if let Some((shortcode, _emoji_str)) =
+                extract_emoji_shortcode(&chars, i, standard_emoji)
+            {
                 let delim_style = base_style.fg(Color::DarkGray);
                 spans.push(Span::styled(":", delim_style));
-                spans.push(Span::styled(shortcode.clone(), base_style.fg(Color::Yellow)));
+                spans.push(Span::styled(
+                    shortcode.clone(),
+                    base_style.fg(Color::Yellow),
+                ));
                 spans.push(Span::styled(":", delim_style));
                 i += shortcode.chars().count() + 2;
                 continue;
@@ -352,7 +374,11 @@ fn resolve_formatted_line(text: &str, base_style: Style, standard_emoji: &std::c
     Line::from(spans)
 }
 
-fn extract_emoji_shortcode(chars: &[char], start: usize, standard_emoji: &std::collections::HashMap<String, String>) -> Option<(String, String)> {
+fn extract_emoji_shortcode(
+    chars: &[char],
+    start: usize,
+    standard_emoji: &std::collections::HashMap<String, String>,
+) -> Option<(String, String)> {
     if start + 2 >= chars.len() {
         return None;
     }
@@ -367,7 +393,11 @@ fn extract_emoji_shortcode(chars: &[char], start: usize, standard_emoji: &std::c
             }
             return None;
         }
-        if !chars[j].is_ascii_alphanumeric() && chars[j] != '_' && chars[j] != '-' && chars[j] != '+' {
+        if !chars[j].is_ascii_alphanumeric()
+            && chars[j] != '_'
+            && chars[j] != '-'
+            && chars[j] != '+'
+        {
             return None;
         }
     }

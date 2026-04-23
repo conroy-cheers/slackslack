@@ -50,8 +50,7 @@ pub fn extract_cookie(cookies_path: &Path) -> Result<String> {
 
 fn decrypt_cookie(encrypted_value: &[u8], password: &[u8]) -> Result<String> {
     // Chromium encrypted cookies on Linux start with a version prefix
-    let ciphertext = if encrypted_value.starts_with(b"v10") || encrypted_value.starts_with(b"v11")
-    {
+    let ciphertext = if encrypted_value.starts_with(b"v10") || encrypted_value.starts_with(b"v11") {
         &encrypted_value[3..]
     } else {
         encrypted_value
@@ -76,10 +75,7 @@ fn decrypt_cookie(encrypted_value: &[u8], password: &[u8]) -> Result<String> {
 
     // The first AES-CBC block (16 bytes) may decrypt to garbage if Chromium
     // uses a stored IV we don't have. Scan for the xoxd- token in the decrypted bytes.
-    if let Some(pos) = decrypted
-        .windows(5)
-        .position(|w| w == b"xoxd-")
-    {
+    if let Some(pos) = decrypted.windows(5).position(|w| w == b"xoxd-") {
         let cookie_bytes = &decrypted[pos..];
         let value = String::from_utf8(cookie_bytes.to_vec())
             .map_err(|_| anyhow::anyhow!("Cookie value after xoxd- prefix is not valid UTF-8"))?;
@@ -102,6 +98,9 @@ mod tests {
     #[test]
     fn decrypt_cookie_rejects_gibberish() {
         let err = decrypt_cookie(b"not-a-real-cookie", b"peanuts").unwrap_err();
-        assert!(err.to_string().contains("AES decryption failed") || err.to_string().contains("valid Slack cookie"));
+        assert!(
+            err.to_string().contains("AES decryption failed")
+                || err.to_string().contains("valid Slack cookie")
+        );
     }
 }

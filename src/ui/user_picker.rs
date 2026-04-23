@@ -3,7 +3,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
+};
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
     let area = centered_rect(50, 60, frame.area());
@@ -30,7 +33,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     // Search input
     let search_line = Line::from(vec![
-        Span::styled(" @", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " @",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             state.user_picker_query.clone(),
             Style::default().fg(Color::White),
@@ -39,7 +47,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             if state.user_picker_results.is_empty() && !state.user_picker_query.is_empty() {
                 " (no matches)".to_string()
             } else if !state.user_picker_results.is_empty() {
-                format!(" [{}/{}]", state.user_picker_selected + 1, state.user_picker_results.len())
+                format!(
+                    " [{}/{}]",
+                    state.user_picker_selected + 1,
+                    state.user_picker_results.len()
+                )
             } else {
                 String::new()
             },
@@ -66,14 +78,18 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         .map(|(i, (_user_id, display_name))| {
             let selected = i == state.user_picker_selected;
             let style = if selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", display_name), style),
-            ]))
+            ListItem::new(Line::from(vec![Span::styled(
+                format!(" {} ", display_name),
+                style,
+            )]))
         })
         .collect();
 
@@ -91,7 +107,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             .end_symbol(None)
             .thumb_style(Style::default().fg(Color::Blue))
             .track_style(Style::default().fg(Color::DarkGray));
-        let mut scrollbar_state = ScrollbarState::new(item_count).position(state.user_picker_selected);
+        let mut scrollbar_state =
+            ScrollbarState::new(item_count).position(state.user_picker_selected);
         frame.render_stateful_widget(scrollbar, results_area, &mut scrollbar_state);
     }
 

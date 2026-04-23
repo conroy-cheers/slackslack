@@ -1,4 +1,4 @@
-use crate::slack::types::{Channel, ChannelSection, ChannelIdsPage, Message, SlackFile};
+use crate::slack::types::{Channel, ChannelIdsPage, ChannelSection, Message, SlackFile};
 use crate::state::{AppState, CachedImage, EmojiPickerSource, InputMode};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -24,14 +24,22 @@ fn msg_with_image(text: &str, ts: &str, url: &str) -> Message {
     m.files.push(SlackFile {
         id: "F1".into(),
         name: "photo.png".into(),
+        title: None,
         mimetype: Some("image/png".into()),
         filetype: Some("png".into()),
+        pretty_type: None,
+        user: None,
+        url_private_download: None,
         url_private: None,
         thumb_360: Some(url.into()),
         thumb_480: None,
         thumb_160: None,
         thumb_360_w: 360,
         thumb_360_h: 240,
+        size: None,
+        created: None,
+        timestamp: None,
+        channels: Vec::new(),
     });
     m
 }
@@ -79,7 +87,10 @@ fn state_with_image_messages(count: usize, image_every: usize) -> AppState {
         }
     }
 
-    let cd = state.channel_data.entry("C1".into()).or_insert_with(crate::state::ChannelData::new);
+    let cd = state
+        .channel_data
+        .entry("C1".into())
+        .or_insert_with(crate::state::ChannelData::new);
     cd.messages = messages.into();
     for url in &cached_urls {
         state.image_cache.insert(
@@ -106,16 +117,8 @@ fn assert_placements_valid(state: &AppState) {
         let visible_end = info.scroll_y + info.inner_height as usize;
 
         // Placement line must be in the renderable range
-        assert!(
-            p.display_rows > 0,
-            "placement[{}]: zero display_rows",
-            i
-        );
-        assert!(
-            p.display_cols > 0,
-            "placement[{}]: zero display_cols",
-            i
-        );
+        assert!(p.display_rows > 0, "placement[{}]: zero display_rows", i);
+        assert!(p.display_cols > 0, "placement[{}]: zero display_cols", i);
 
         // If the placement would be visible, verify coordinates
         if p.line >= visible_start && p.line < visible_end {

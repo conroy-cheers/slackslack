@@ -110,7 +110,11 @@ async fn connect_and_run(
                         let _ = tx.send(RealtimeEvent::WsEvent(event));
                     }
                     DecodedTextEvent::Unknown(err) => {
-                        warn!("Unknown WS event: {} (raw: {})", err, &text[..text.len().min(200)]);
+                        warn!(
+                            "Unknown WS event: {} (raw: {})",
+                            err,
+                            &text[..text.len().min(200)]
+                        );
                     }
                 }
             }
@@ -163,14 +167,20 @@ mod tests {
 
     #[test]
     fn decodes_goodbye_event() {
-        assert!(matches!(decode_text_event(r#"{"type":"goodbye"}"#), DecodedTextEvent::Goodbye));
+        assert!(matches!(
+            decode_text_event(r#"{"type":"goodbye"}"#),
+            DecodedTextEvent::Goodbye
+        ));
     }
 
     #[test]
     fn decodes_error_event_message() {
         match decode_text_event(r#"{"type":"error","error":{"msg":"boom"}}"#) {
             DecodedTextEvent::ApiError(msg) => assert_eq!(msg, "boom"),
-            other => panic!("expected api error, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected api error, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -181,7 +191,24 @@ mod tests {
                 assert_eq!(msg.channel.as_deref(), Some("C1"));
                 assert_eq!(msg.text, "hi");
             }
-            other => panic!("expected ws message, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected ws message, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn decodes_presence_change_event() {
+        match decode_text_event(r#"{"type":"presence_change","user":"U1","presence":"active"}"#) {
+            DecodedTextEvent::Event(WsEvent::PresenceChange(event)) => {
+                assert_eq!(event.user.as_deref(), Some("U1"));
+                assert_eq!(event.presence.as_deref(), Some("active"));
+            }
+            other => panic!(
+                "expected presence change, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 }

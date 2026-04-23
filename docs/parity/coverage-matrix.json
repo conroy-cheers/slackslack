@@ -1,0 +1,679 @@
+{
+  "schema_version": "1.0",
+  "catalog_source": "docs/parity/catalog-current.md",
+  "release_gate_policy": "docs/parity/release-gates.json",
+  "families": [
+    {
+      "id": "bootstrap_session",
+      "release_gated": true,
+      "interfaces": [
+        {
+          "name": "auth.test",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "rtm.connect",
+          "status": "implemented_seeded",
+          "source": "public-doc / legacy",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "desktop credential extraction",
+          "status": "implemented_seeded",
+          "source": "desktop local state",
+          "classification": "private-stable",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "repo_observation",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "client boot / web bootstrap payloads",
+          "status": "pending",
+          "source": "first-party web/desktop",
+          "classification": "private-stable",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": false,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "conversations_workspace_metadata",
+      "release_gated": true,
+      "interfaces": [
+        {
+          "name": "conversations.list",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "conversations.info",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "conversations.members",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "conversations.open",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "users.conversations",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "users.channelSections.list",
+          "status": "implemented_seeded",
+          "source": "first-party desktop/web",
+          "classification": "private-stable",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": false,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "repo_observation",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "messages_threads_reactions_pins",
+      "release_gated": true,
+      "interfaces": [
+        {
+          "name": "conversations.history",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "conversations.replies",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "conversations.mark",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "chat.postMessage",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "reactions.add/remove",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": true,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "pins.list",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "users_presence_profiles",
+      "release_gated": true,
+      "interfaces": [
+        {
+          "name": "users.list",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "users.info",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "users.profile.get",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "team.profile.get",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "presence_change",
+          "status": "decode_covered",
+          "source": "public-doc / RTM family",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "unit_test",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "search",
+      "release_gated": true,
+      "interfaces": [
+        {
+          "name": "search.messages",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "search.files",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "files_media_metadata",
+      "release_gated": true,
+      "interfaces": [
+        {
+          "name": "files.getUploadURLExternal/files.completeUploadExternal",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "raw private file download",
+          "status": "implemented_seeded",
+          "source": "first-party/web user session behavior",
+          "classification": "private-stable",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": false,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "repo_observation",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "files.info",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "files.list",
+          "status": "implemented_seeded",
+          "source": "public-doc",
+          "classification": "public-documented",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": true,
+            "schema": true,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "public_doc",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        },
+        {
+          "name": "huddles/calls/media signaling",
+          "status": "pending",
+          "source": "first-party web/desktop",
+          "classification": "private-stable",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": false,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "seed_note",
+              "path": "docs/parity/seed-observations.md"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "excluded_surfaces",
+      "release_gated": false,
+      "interfaces": [
+        {
+          "name": "mobile-only parity",
+          "status": "excluded",
+          "source": "scope-policy",
+          "classification": "excluded",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": false,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "scope_policy",
+              "path": "docs/parity/scope-policy.md"
+            }
+          ]
+        },
+        {
+          "name": "admin/org-management tooling",
+          "status": "excluded",
+          "source": "scope-policy",
+          "classification": "excluded",
+          "release_ready": false,
+          "canary_eligible": false,
+          "coverage": {
+            "unit": false,
+            "schema": false,
+            "replay": false,
+            "workflow": false,
+            "canary": false
+          },
+          "evidence": [
+            {
+              "kind": "scope_policy",
+              "path": "docs/parity/scope-policy.md"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

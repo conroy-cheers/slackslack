@@ -3,7 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
     state.thread_placements.clear();
@@ -62,13 +64,15 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         let screen_row = inner.y + (*vline - scroll_y) as u16;
         let screen_col = inner.x;
         if state.avatar_images.contains_key(user_id.as_str()) {
-            state.inline_emoji_placements.push(crate::state::InlineEmojiPlacement {
-                emoji_key: format!("avatar:{}", user_id),
-                screen_row,
-                screen_col,
-                display_cols: 2,
-                display_rows: 1,
-            });
+            state
+                .inline_emoji_placements
+                .push(crate::state::InlineEmojiPlacement {
+                    emoji_key: format!("avatar:{}", user_id),
+                    screen_row,
+                    screen_col,
+                    display_cols: 2,
+                    display_rows: 1,
+                });
         } else {
             state.request_avatar(user_id);
         }
@@ -100,7 +104,12 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 fn build_thread_lines(
     state: &AppState,
     width: usize,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<String>, Vec<(String, usize)>) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<ImagePlacement>,
+    Vec<String>,
+    Vec<(String, usize)>,
+) {
     let msgs = match state.thread_messages() {
         Some(msgs) if !msgs.is_empty() => msgs,
         _ => {
@@ -126,7 +135,15 @@ fn build_thread_lines(
         if let Some(uid) = &msg.user {
             avatars.push((uid.clone(), result.len()));
         }
-        render_thread_message(msg, state, width, i == 0, &mut result, &mut placements, &mut emoji_needed);
+        render_thread_message(
+            msg,
+            state,
+            width,
+            i == 0,
+            &mut result,
+            &mut placements,
+            &mut emoji_needed,
+        );
         if i + 1 < msg_count {
             result.push(Line::from(""));
         }
@@ -153,7 +170,9 @@ fn render_thread_message(
 
     let time = format_timestamp(&msg.ts);
 
-    let name_color = msg.user.as_ref()
+    let name_color = msg
+        .user
+        .as_ref()
         .map(|uid| state.user_color(uid))
         .unwrap_or(Color::Green);
     let name_style = if is_parent {
@@ -161,9 +180,7 @@ fn render_thread_message(
             .fg(name_color)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
-        Style::default()
-            .fg(name_color)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(name_color).add_modifier(Modifier::BOLD)
     };
 
     let header_spans: Vec<Span<'static>> = vec![
@@ -175,7 +192,8 @@ fn render_thread_message(
     out.push(Line::from(header_spans));
 
     // Body text with rich formatting and custom emoji
-    let body_lines = super::messages::render_rich_text_pub(&msg.text, state, width.saturating_sub(2));
+    let body_lines =
+        super::messages::render_rich_text_pub(&msg.text, state, width.saturating_sub(2));
     for line_spans in body_lines {
         let line_idx = out.len();
         let mut final_spans = vec![Span::styled("  ".to_string(), Style::default())];
@@ -205,10 +223,21 @@ fn render_thread_message(
                 spans.push(Span::from(String::from(" ")));
                 col += 1;
             }
-            super::messages::render_reaction_emoji(&r.name, state, reaction_line, &mut col, &mut spans, placements, emoji_needed);
+            super::messages::render_reaction_emoji(
+                &r.name,
+                state,
+                reaction_line,
+                &mut col,
+                &mut spans,
+                placements,
+                emoji_needed,
+            );
             let count_str = format!(" {}", r.count);
             col += count_str.len() as u16;
-            spans.push(Span::styled(count_str, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                count_str,
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         out.push(Line::from(spans));
     }

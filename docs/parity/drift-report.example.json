@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-04-21T00:00:00Z",
+  "source": "live_canary",
+  "summary": {
+    "release_blocking_failures": 0,
+    "drift_triage_failures": 1
+  },
+  "entries": [
+    {
+      "family": "conversations_workspace_metadata",
+      "interface": "conversations.info",
+      "severity": "drift_triage",
+      "evidence_path": "docs/parity/fixtures/http/conversations_workspace_metadata/conversations-info.response.json",
+      "note": "Observed extra field in first-party response; parser still tolerant."
+    }
+  ]
+}

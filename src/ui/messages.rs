@@ -4,7 +4,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use unicode_width::UnicodeWidthStr;
 
 pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
@@ -44,7 +46,9 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         .border_style(border_style)
         .title(Span::styled(
             title_text,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
@@ -58,8 +62,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     // Build all lines as owned data (Line<'static>) so we don't borrow state
     let msg_count = state.message_count();
-    let selected_idx = msg_count.saturating_sub(1).saturating_sub(state.selected_message_idx);
-    let (lines, placements, msg_line_starts, emoji_needed, avatars, content_line_count) = build_lines(state, width, selected_idx);
+    let selected_idx = msg_count
+        .saturating_sub(1)
+        .saturating_sub(state.selected_message_idx);
+    let (lines, placements, msg_line_starts, emoji_needed, avatars, content_line_count) =
+        build_lines(state, width, selected_idx);
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(height);
 
@@ -99,13 +106,15 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         // col 1 = after the marker character
         let screen_col = inner.x + 1;
         if state.avatar_images.contains_key(user_id.as_str()) {
-            state.inline_emoji_placements.push(crate::state::InlineEmojiPlacement {
-                emoji_key: format!("avatar:{}", user_id),
-                screen_row,
-                screen_col,
-                display_cols: 2,
-                display_rows: 1,
-            });
+            state
+                .inline_emoji_placements
+                .push(crate::state::InlineEmojiPlacement {
+                    emoji_key: format!("avatar:{}", user_id),
+                    screen_row,
+                    screen_col,
+                    display_cols: 2,
+                    display_rows: 1,
+                });
         } else {
             state.request_avatar(user_id);
         }
@@ -130,7 +139,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
             .thumb_style(thumb_style)
             .track_style(Style::default().fg(Color::DarkGray));
         let sb_max = content_line_count.saturating_sub(height);
-        let mut scrollbar_state = ScrollbarState::new(content_line_count).position(scroll_y.min(sb_max));
+        let mut scrollbar_state =
+            ScrollbarState::new(content_line_count).position(scroll_y.min(sb_max));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
@@ -139,7 +149,14 @@ fn build_lines(
     state: &AppState,
     width: usize,
     selected_idx: usize,
-) -> (Vec<Line<'static>>, Vec<ImagePlacement>, Vec<usize>, Vec<String>, Vec<(String, usize)>, usize) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<ImagePlacement>,
+    Vec<usize>,
+    Vec<String>,
+    Vec<(String, usize)>,
+    usize,
+) {
     let messages = state.channel_messages();
 
     let mut placements = Vec::new();
@@ -172,8 +189,8 @@ fn build_lines(
                     avatars.push((uid.clone(), lines.len()));
                 }
                 let is_selected = i == selected_idx;
-                let is_search_match = state.message_search_active
-                    && state.message_search_results_set.contains(&i);
+                let is_search_match =
+                    state.message_search_active && state.message_search_results_set.contains(&i);
                 render_message(
                     msg,
                     state,
@@ -216,7 +233,14 @@ fn build_lines(
         )));
     }
 
-    (result, placements, msg_line_starts, emoji_needed, avatars, content_line_count)
+    (
+        result,
+        placements,
+        msg_line_starts,
+        emoji_needed,
+        avatars,
+        content_line_count,
+    )
 }
 
 fn render_message(
@@ -255,7 +279,9 @@ fn render_message(
     };
 
     // Header: "▎ [avatar] username  HH:MM"
-    let name_color = msg.user.as_ref()
+    let name_color = msg
+        .user
+        .as_ref()
         .map(|uid| state.user_color(uid))
         .unwrap_or(Color::Green);
     let mut header_spans: Vec<Span<'static>> = vec![
@@ -263,9 +289,7 @@ fn render_message(
         Span::styled("  ".to_string(), Style::default()), // avatar placeholder
         Span::styled(
             username,
-            Style::default()
-                .fg(name_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(name_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default()),
         Span::styled(time, Style::default().fg(Color::DarkGray)),
@@ -326,45 +350,72 @@ fn render_message(
     if !msg.reactions.is_empty() {
         if is_selected {
             for r in &msg.reactions {
-                let mut spans: Vec<Span<'static>> = vec![Span::styled("▎ ".to_string(), prefix_style)];
+                let mut spans: Vec<Span<'static>> =
+                    vec![Span::styled("▎ ".to_string(), prefix_style)];
                 let reaction_line = out.len();
                 let mut col: u16 = 2;
-                render_reaction_emoji(&r.name, state, reaction_line, &mut col, &mut spans, placements, emoji_needed);
+                render_reaction_emoji(
+                    &r.name,
+                    state,
+                    reaction_line,
+                    &mut col,
+                    &mut spans,
+                    placements,
+                    emoji_needed,
+                );
                 let name_str = format!(" :{}:", r.name);
                 spans.push(Span::styled(name_str, Style::default().fg(Color::DarkGray)));
                 let is_self = r.users.contains(&state.self_user_id);
                 let count_str = format!(" {}", r.count);
-                spans.push(Span::styled(count_str, if is_self {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                }));
+                spans.push(Span::styled(
+                    count_str,
+                    if is_self {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ));
                 if is_self {
                     spans.push(Span::styled(" ✓", Style::default().fg(Color::Green)));
                 }
-                let user_names: Vec<&str> = r.users.iter()
+                let user_names: Vec<&str> = r
+                    .users
+                    .iter()
                     .map(|uid| state.user_display_name(uid))
                     .collect();
                 let users_str = format!("  {}", user_names.join(", "));
-                spans.push(Span::styled(users_str, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    users_str,
+                    Style::default().fg(Color::DarkGray),
+                ));
                 out.push(Line::from(spans));
             }
         } else {
             let mut col: u16 = 2;
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                "  ".to_string(),
-                prefix_style,
-            )];
+            let mut spans: Vec<Span<'static>> = vec![Span::styled("  ".to_string(), prefix_style)];
             let reaction_line = out.len();
             for (i, r) in msg.reactions.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::from(String::from(" ")));
                     col += 1;
                 }
-                render_reaction_emoji(&r.name, state, reaction_line, &mut col, &mut spans, placements, emoji_needed);
+                render_reaction_emoji(
+                    &r.name,
+                    state,
+                    reaction_line,
+                    &mut col,
+                    &mut spans,
+                    placements,
+                    emoji_needed,
+                );
                 let count_str = format!(" {}", r.count);
                 col += count_str.len() as u16;
-                spans.push(Span::styled(count_str, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    count_str,
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             out.push(Line::from(spans));
         }
@@ -618,7 +669,11 @@ pub fn render_reaction_emoji(
     }
 }
 
-pub fn render_rich_text_pub(text: &str, state: &AppState, usable_width: usize) -> Vec<Vec<Span<'static>>> {
+pub fn render_rich_text_pub(
+    text: &str,
+    state: &AppState,
+    usable_width: usize,
+) -> Vec<Vec<Span<'static>>> {
     render_rich_text(text, state, usable_width)
 }
 
@@ -765,10 +820,7 @@ fn parse_inline_formatting(line: &str) -> Vec<Span<'static>> {
                     spans.push(Span::raw(std::mem::take(&mut current)));
                 }
                 let content: String = chars[i + 1..end].iter().collect();
-                spans.push(Span::styled(
-                    content,
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled(content, Style::default().fg(Color::DarkGray)));
                 i = end + 1;
                 continue;
             }
@@ -806,7 +858,10 @@ fn wrap_spans(spans: &[Span<'static>], max_width: usize) -> Vec<Vec<Span<'static
     }
 
     // Calculate total width
-    let total: usize = spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+    let total: usize = spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
     if total <= max_width {
         return vec![spans.to_vec()];
     }
@@ -852,7 +907,10 @@ fn wrap_spans(spans: &[Span<'static>], max_width: usize) -> Vec<Vec<Span<'static
 
     // Flush remaining
     if !current_text.is_empty() {
-        current_spans.push(Span::styled(current_text, current_style.unwrap_or_default()));
+        current_spans.push(Span::styled(
+            current_text,
+            current_style.unwrap_or_default(),
+        ));
     }
     if !current_spans.is_empty() {
         result.push(current_spans);
@@ -913,14 +971,22 @@ mod tests {
         m.files.push(SlackFile {
             id: "F1".into(),
             name: "photo.png".into(),
+            title: None,
             mimetype: Some("image/png".into()),
             filetype: Some("png".into()),
+            pretty_type: None,
+            user: None,
+            url_private_download: None,
             url_private: None,
             thumb_360: Some(url.into()),
             thumb_480: None,
             thumb_160: None,
             thumb_360_w: 360,
             thumb_360_h: 240,
+            size: None,
+            created: None,
+            timestamp: None,
+            channels: Vec::new(),
         });
         m
     }
@@ -943,7 +1009,10 @@ mod tests {
             unread_count_display: 0,
         }];
         state.selected_channel_idx = 0;
-        let cd = state.channel_data.entry("C1".into()).or_insert_with(crate::state::ChannelData::new);
+        let cd = state
+            .channel_data
+            .entry("C1".into())
+            .or_insert_with(crate::state::ChannelData::new);
         cd.messages = messages.into();
         for url in cached_urls {
             state.image_cache.insert(
@@ -971,7 +1040,6 @@ mod tests {
         let state = state_with(messages, &["http://img1", "http://img2"]);
 
         let (lines, placements, starts, _, _, _) = build_lines(&state, 80, 3);
-
 
         for p in &placements {
             assert!(
@@ -1010,14 +1078,14 @@ mod tests {
                     &format!("http://img{}", i),
                 ));
             } else {
-                messages.push(msg(
-                    &format!("text msg {}", i),
-                    &format!("{}.0", 1000 + i),
-                ));
+                messages.push(msg(&format!("text msg {}", i), &format!("{}.0", 1000 + i)));
             }
         }
 
-        let cached: Vec<String> = (0..20).step_by(4).map(|i| format!("http://img{}", i)).collect();
+        let cached: Vec<String> = (0..20)
+            .step_by(4)
+            .map(|i| format!("http://img{}", i))
+            .collect();
         let refs: Vec<&str> = cached.iter().map(|s| s.as_str()).collect();
         let state = state_with(messages, &refs);
 
@@ -1064,7 +1132,10 @@ mod tests {
     #[test]
     fn narrow_and_wide_widths() {
         let messages = vec![
-            msg("a long message that might need wrapping in narrow views", "1000.0"),
+            msg(
+                "a long message that might need wrapping in narrow views",
+                "1000.0",
+            ),
             msg_with_image("image", "1001.0", "http://img"),
         ];
         let state = state_with(messages, &["http://img"]);

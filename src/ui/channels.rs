@@ -3,7 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 const DM_TRUNCATE_LIMIT: usize = 10;
 
@@ -21,7 +23,14 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         let visible_indices = state.filtered_channel_indices();
         for &ch_idx in &visible_indices {
             let vis_idx = items.len();
-            let item = render_channel_item(state, ch_idx, vis_idx, max_name_width, is_focused, is_searching);
+            let item = render_channel_item(
+                state,
+                ch_idx,
+                vis_idx,
+                max_name_width,
+                is_focused,
+                is_searching,
+            );
             items.push(item);
             list_entries.push(ChannelListEntry::Channel(ch_idx));
         }
@@ -29,7 +38,9 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
         // Section-based layout
         let sections = state.channels_by_section();
 
-        for (sec_idx, (section_name, section_id, ch_indices, section_emoji)) in sections.iter().enumerate() {
+        for (sec_idx, (section_name, section_id, ch_indices, section_emoji)) in
+            sections.iter().enumerate()
+        {
             // Spacer between sections (except first)
             if sec_idx > 0 {
                 items.push(ListItem::new(Line::from("")));
@@ -52,7 +63,11 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
             // Section header
             let collapse_indicator = if section_id.is_some() {
-                if is_collapsed { "\u{25B8} " } else { "\u{25BE} " } // ▸ / ▾
+                if is_collapsed {
+                    "\u{25B8} "
+                } else {
+                    "\u{25BE} "
+                } // ▸ / ▾
             } else {
                 ""
             };
@@ -73,7 +88,8 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 header_style,
             ))));
             if let Some(emoji_name) = section_emoji {
-                if crate::ui::emoji::emoji_for_runtime(emoji_name, &state.standard_emoji).is_none() {
+                if crate::ui::emoji::emoji_for_runtime(emoji_name, &state.standard_emoji).is_none()
+                {
                     custom_emoji_headers.push((header_visual_idx, emoji_name.clone()));
                 }
             }
@@ -100,7 +116,14 @@ pub fn render(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
             for &ch_idx in visible_channels {
                 let vis_idx = items.len();
-                let item = render_channel_item(state, ch_idx, vis_idx, max_name_width, is_focused, is_searching);
+                let item = render_channel_item(
+                    state,
+                    ch_idx,
+                    vis_idx,
+                    max_name_width,
+                    is_focused,
+                    is_searching,
+                );
                 items.push(item);
                 list_entries.push(ChannelListEntry::Channel(ch_idx));
             }
@@ -226,7 +249,12 @@ fn render_channel_item<'a>(
         let (name, color) = ch
             .user
             .as_ref()
-            .map(|uid| (state.user_display_name(uid).to_string(), Some(state.user_color(uid))))
+            .map(|uid| {
+                (
+                    state.user_display_name(uid).to_string(),
+                    Some(state.user_color(uid)),
+                )
+            })
             .unwrap_or_else(|| (ch.display_name().to_string(), None));
         ("  ", name, color)
     } else if ch.is_mpim {

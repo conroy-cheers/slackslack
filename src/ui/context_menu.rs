@@ -35,9 +35,7 @@ pub fn render(frame: &mut Frame, state: &AppState, messages_area: Rect) {
                 Style::default().fg(Color::White)
             };
             let key_style = if selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
@@ -85,8 +83,7 @@ pub fn overlay_rect(state: &AppState, messages_area: Rect) -> Rect {
     let inner_y = messages_area.y + 1;
     let inner_bottom = messages_area.y + messages_area.height;
 
-    let menu_y = (inner_y + screen_line + 1)
-        .min(inner_bottom.saturating_sub(menu_height));
+    let menu_y = (inner_y + screen_line + 1).min(inner_bottom.saturating_sub(menu_height));
     let menu_x = messages_area
         .x
         .saturating_add(4)
